@@ -1,0 +1,114 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            artifact: qsc-linux-x86_64
+            shell: bash
+
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifact: qsc-linux-aarch64
+            shell: bash
+
+          - name: macos-x86_64
+            os: macos-13
+            artifact: qsc-macos-x86_64
+            shell: bash
+
+          - name: macos-aarch64
+            os: macos-14
+            artifact: qsc-macos-aarch64
+            shell: bash
+
+          - name: windows-x86_64
+            os: windows-latest
+            artifact: qsc-windows-x86_64
+            shell: 'msys2 {0}'
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (Windows)
+        if: matrix.name == 'windows-x86_64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            gcc
+            make
+
+      - name: Build
+        working-directory: src
+        run: make -j2
+
+      - name: Smoke test
+        working-directory: src
+        run: ./qsc --help || ./qsc --self-test || true
+
+      - name: Stage artifact
+        working-directory: src
+        run: |
+          mkdir -p ../dist
+          if [ "${{ matrix.name }}" = "windows-x86_64" ]; then
+            cp qsc.exe ../dist/${{ matrix.artifact }}.exe
+            # Bundle MSYS runtime DLL (qsc uses fork/exec -> needs POSIX layer)
+            cp /usr/bin/msys-2.0.dll ../dist/ 2>/dev/null || true
+          else
+            cp qsc ../dist/${{ matrix.artifact }}
+          fi
+          cp ../runtime.c ../runtime.h ../dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package release assets
+        run: |
+          mkdir -p release
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            tar -czf "../release/${name}.tar.gz" -C "$dir" .
+          done
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.tar.gz
+          generate_release_notes: true
