@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="logo.svg" alt="Quickscript logo" width="200" />
-  <p style="font-size: 3rem;">Quickscript</p>
+  <img src="logo.svg" alt="QuickScript logo" width="200" />
+  <br>
   <a href="https://github.com/Bilal1545/quickscript/stargazers">
     <img src="https://img.shields.io/github/stars/Bilal1545/quickscript?style=for-the-badge&logo=github&color=E3B341&logoColor=D9E0EE&labelColor=000000" alt="GitHub stars">
   </a>
@@ -11,11 +11,11 @@
 
 ---
 
-## Why quickscript?
+## Why QuickScript?
 
 JavaScript is a widely used and practical language, but its distribution model comes with a recurring limitation: it requires a runtime. In most cases, running a program means installing Node.js or a similar environment, which introduces external dependencies, large node_modules trees, and additional startup overhead even for small programs.
 
-quickscript is designed to address this specific gap. It keeps a JavaScript-like syntax while compiling .qs files into standalone native binaries. The goal is to remove the need for an external interpreter or runtime on the target system.
+QuickScript is designed to address this specific gap. It keeps a JavaScript-like syntax while compiling .qs files into standalone native binaries. The goal is to remove the need for an external interpreter or runtime on the target system.
 
 ## Install
 

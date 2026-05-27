@@ -1,16 +1,16 @@
 # qsc installer for Windows — downloads the latest prebuilt binary from GitHub Releases.
 #
 # Usage (PowerShell):
-#   iwr -useb https://raw.githubusercontent.com/Bilal1545/Quickscript/main/install.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/Bilal1545/quickscript/main/install.ps1 | iex
 #
 # Environment:
-#   QSC_REPO     GitHub "owner/repo"           (default: Bilal1545/Quickscript)
+#   QSC_REPO     GitHub "owner/repo"           (default: Bilal1545/quickscript)
 #   QSC_VERSION  Release tag, or "latest"      (default: latest)
 #   QSC_PREFIX   Install directory             (default: $env:LOCALAPPDATA\qsc)
 
 $ErrorActionPreference = "Stop"
 
-$Repo    = if ($env:QSC_REPO)    { $env:QSC_REPO }    else { "Bilal1545/Quickscript" }
+$Repo    = if ($env:QSC_REPO)    { $env:QSC_REPO }    else { "Bilal1545/quickscript" }
 $Tag     = if ($env:QSC_VERSION) { $env:QSC_VERSION } else { "latest" }
 $Prefix  = if ($env:QSC_PREFIX)  { $env:QSC_PREFIX }  else { Join-Path $env:LOCALAPPDATA "qsc" }
 
