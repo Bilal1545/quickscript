@@ -7,9 +7,7 @@
   <a href="https://github.com/Bilal1545/quickscript/forks">
     <img src="https://img.shields.io/github/forks/Bilal1545/quickscript?style=for-the-badge&logo=github&color=E3B341&logoColor=D9E0EE&labelColor=000000" alt="GitHub stars">
   </a>
-  <a href="https://github.com/Bilal1545/quickscript/watchers">
-    <img src="https://img.shields.io/github/watchers/Bilal1545/quickscript?style=for-the-badge&logo=github&color=E3B341&logoColor=D9E0EE&labelColor=000000" alt="GitHub stars">
-  </a>
+  <img src="https://img.shields.io/github/actions/workflow/status/Bilal1545/quickscript/ci.yml?style=for-the-badge" />
 </div>
 
 ---
