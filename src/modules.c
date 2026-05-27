@@ -35,7 +35,165 @@ typedef struct {
     size_t order_len, order_cap;
     int counter;
     ParseError err;
+
+    /* C-header imports collected across all modules. The `local` field starts
+     * as the source-level identifier and is rewritten to the post-rename name
+     * after build_rename_map runs (so codegen binds the wrapper to the same
+     * symbol the renamed QS source references). */
+    CImportList *c_imports;          /* may be NULL when caller doesn't care */
+    /* Per c_imports entry, the owning module — used after rename to translate
+     * `local` to its final mangled form. */
+    ModuleInfo **c_import_owners;
+    size_t c_import_owners_cap;
+
+    /* Library names collected from `// @link <name>` directives in any
+     * bundled source. NULL when caller doesn't care. */
+    LinkList *link_libs;
 } Bundler;
+
+void cimport_list_init(CImportList *l) {
+    l->items = NULL;
+    l->len = 0;
+    l->cap = 0;
+}
+
+void cimport_list_free(CImportList *l) {
+    free(l->items);
+    l->items = NULL;
+    l->len = 0;
+    l->cap = 0;
+}
+
+void link_list_init(LinkList *l) {
+    l->items = NULL;
+    l->len = 0;
+    l->cap = 0;
+}
+
+void link_list_free(LinkList *l) {
+    free(l->items);
+    l->items = NULL;
+    l->len = 0;
+    l->cap = 0;
+}
+
+void link_list_add(LinkList *l, const char *name) {
+    if (!l || !name || !name[0]) return;
+    for (size_t i = 0; i < l->len; ++i) {
+        if (strcmp(l->items[i], name) == 0) return;
+    }
+    if (l->len == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 4;
+        const char **p = (const char **)realloc(l->items, nc * sizeof(*p));
+        if (!p) { fprintf(stderr, "qsc: oom\n"); abort(); }
+        l->items = p;
+        l->cap = nc;
+    }
+    l->items[l->len++] = name;
+}
+
+/* True iff the character is a name-token separator in a @link directive. */
+static bool link_sep(char c) {
+    return c == ' ' || c == '\t' || c == ',';
+}
+
+/* Parse a stream of `name name name` tokens starting at *pi, stopping at
+ * end-of-comment (newline for line comments, "*\047" for block comments). */
+static void parse_link_names(LinkList *out, Arena *arena,
+                             const char *src, size_t len, size_t *pi, bool block) {
+    size_t i = *pi;
+    while (i < len) {
+        while (i < len && link_sep(src[i])) i++;
+        if (i >= len) break;
+        if (!block && (src[i] == '\n' || src[i] == '\r')) break;
+        if (block && src[i] == '*' && i + 1 < len && src[i+1] == '/') break;
+        size_t start = i;
+        while (i < len && !link_sep(src[i])
+               && src[i] != '\n' && src[i] != '\r'
+               && !(block && src[i] == '*' && i + 1 < len && src[i+1] == '/'))
+            i++;
+        if (i > start) {
+            char *name = arena_strndup(arena, src + start, i - start);
+            link_list_add(out, name);
+        }
+    }
+    *pi = i;
+}
+
+/* Scan `src` for `// @link name name` (and `/​* @link name name *​/`)
+ * directives. The `@link` token must be the first non-whitespace content of
+ * the comment — `// no @link here` is correctly ignored. String literals are
+ * skipped so directives inside QS strings don't trigger false positives. */
+static void scan_link_directives(LinkList *out, Arena *arena,
+                                 const char *src, size_t len) {
+    if (!out || !src) return;
+    static const char NEEDLE[] = "@link";
+    const size_t NLEN = sizeof NEEDLE - 1;
+
+    size_t i = 0;
+    while (i < len) {
+        char c = src[i];
+        /* Skip string literals so they can't host fake directives. */
+        if (c == '"' || c == '\'' || c == '`') {
+            char q = c;
+            i++;
+            while (i < len && src[i] != q) {
+                if (src[i] == '\\' && i + 1 < len) i += 2;
+                else i++;
+            }
+            if (i < len) i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && src[i+1] == '/') {
+            i += 2;
+            while (i < len && (src[i] == ' ' || src[i] == '\t')) i++;
+            if (i + NLEN <= len && memcmp(src + i, NEEDLE, NLEN) == 0
+                && (i + NLEN == len || src[i+NLEN] == ' ' || src[i+NLEN] == '\t'
+                    || src[i+NLEN] == '\n' || src[i+NLEN] == '\r')) {
+                i += NLEN;
+                parse_link_names(out, arena, src, len, &i, false);
+            }
+            while (i < len && src[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && src[i+1] == '*') {
+            i += 2;
+            /* Skip leading whitespace and decorative `*`s on the first line. */
+            while (i < len && (src[i] == ' ' || src[i] == '\t')) i++;
+            if (i + NLEN <= len && memcmp(src + i, NEEDLE, NLEN) == 0
+                && (i + NLEN == len || src[i+NLEN] == ' ' || src[i+NLEN] == '\t'
+                    || src[i+NLEN] == '\n' || src[i+NLEN] == '\r')) {
+                i += NLEN;
+                parse_link_names(out, arena, src, len, &i, true);
+            }
+            while (i + 1 < len && !(src[i] == '*' && src[i+1] == '/')) i++;
+            if (i + 1 < len) i += 2;
+            continue;
+        }
+        i++;
+    }
+}
+
+static void cimport_push(Bundler *b, ModuleInfo *owner,
+                         const char *header, const char *imported, const char *local) {
+    if (!b->c_imports) return;
+    CImportList *l = b->c_imports;
+    if (l->len == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 4;
+        CImport *p = (CImport *)realloc(l->items, nc * sizeof(*p));
+        ModuleInfo **o = (ModuleInfo **)realloc(b->c_import_owners, nc * sizeof(*o));
+        if (!p || !o) { fprintf(stderr, "qsc: oom\n"); abort(); }
+        l->items = p;
+        b->c_import_owners = o;
+        l->cap = nc;
+        b->c_import_owners_cap = nc;
+    }
+    l->items[l->len].header = header;
+    l->items[l->len].imported = imported;
+    l->items[l->len].local = local;
+    b->c_import_owners[l->len] = owner;
+    l->len++;
+}
 
 static void mod_set_error(Bundler *b, AstNode *node, const char *file, const char *fmt, ...) {
     if (b->err.present) return;
@@ -639,6 +797,7 @@ static ModuleInfo *process_module(Bundler *b, const char *abs_path,
         }
         info->source = src;
         info->source_len = len;
+        scan_link_directives(b->link_libs, b->arena, src, len);
         ParseError perr = {0};
         info->ast = parse_source(src, len, abs_path, b->arena, &perr);
         if (!info->ast) {
@@ -654,6 +813,48 @@ static ModuleInfo *process_module(Bundler *b, const char *abs_path,
         AstNode *node = info->ast->block.body.items[i];
         if (node->kind == AST_IMPORT_DECL) {
             const char *src_path = node->import_decl.source;
+            /* C-header import: "c:<header>" — collect specifiers, skip parsing. */
+            if (src_path[0] == 'c' && src_path[1] == ':') {
+                const char *header_raw = src_path + 2;
+                if (!header_raw[0]) {
+                    mod_set_error(b, node, abs_path, "Empty C header in import 'c:'");
+                    return NULL;
+                }
+                /* Auto-append ".h" when no extension is present so users can
+                 * write `c:math` instead of `c:math.h`. */
+                const char *header;
+                if (strchr(header_raw, '.')) {
+                    header = arena_strdup(b->arena, header_raw);
+                } else {
+                    size_t hl = strlen(header_raw);
+                    char *h = (char *)arena_alloc(b->arena, hl + 3);
+                    memcpy(h, header_raw, hl);
+                    memcpy(h + hl, ".h", 3);
+                    header = h;
+                }
+                for (size_t j = 0; j < node->import_decl.specifiers.len; ++j) {
+                    AstNode *spec = node->import_decl.specifiers.items[j];
+                    if (spec->kind != AST_IMPORT_SPECIFIER) {
+                        mod_set_error(b, node, abs_path,
+                            "C imports only support named specifiers (got default or namespace)");
+                        return NULL;
+                    }
+                    const char *imported = spec->import_specifier.imported->ident.name;
+                    const char *local = spec->import_specifier.local->ident.name;
+                    /* Always rename QS-side binding to `_ci_<local>` so it cannot
+                     * collide with the C library symbol of the same name (e.g.
+                     * `sqrt` from <math.h>). The rename is registered for both
+                     * entry and non-entry modules; build_rename_map only touches
+                     * `bindings`, so this entry survives unmodified. */
+                    size_t ll = strlen(local);
+                    char *renamed = (char *)arena_alloc(b->arena, ll + 5);
+                    memcpy(renamed, "_ci_", 4);
+                    memcpy(renamed + 4, local, ll + 1);
+                    map_put(&info->rename_map, local, renamed);
+                    cimport_push(b, info, header, imported, local);
+                }
+                continue;
+            }
             if (!(src_path[0] == '.' || src_path[0] == '/')) {
                 mod_set_error(b, node, abs_path, "Only relative imports are supported: '%s'", src_path);
                 return NULL;
@@ -687,11 +888,19 @@ static bool entry_has_modules_decl(AstNode *ast) {
 AstNode *bundle_modules(AstNode *entry_ast,
                         const char *entry_source, size_t entry_source_len,
                         const char *entry_filename,
-                        Arena *arena, ParseError *out_err) {
+                        Arena *arena, ParseError *out_err,
+                        CImportList *out_c_imports,
+                        LinkList *out_link_libs) {
     Bundler b;
     memset(&b, 0, sizeof b);
     b.arena = arena;
+    b.c_imports = out_c_imports;
+    b.link_libs = out_link_libs;
     map_init(&b.modules);
+
+    /* Scan the entry source for @link directives. Sub-modules are scanned
+     * inside process_module as they're read off disk. */
+    if (entry_source) scan_link_directives(b.link_libs, arena, entry_source, entry_source_len);
 
     /* canonicalize entry path */
     char *entry_abs = canonicalize(arena, entry_filename);
@@ -709,6 +918,7 @@ AstNode *bundle_modules(AstNode *entry_ast,
     if (map_len(&b.modules) == 1 && !entry_has_modules_decl(entry_ast)) {
         if (out_err) memset(out_err, 0, sizeof *out_err);
         free(b.order);
+        free(b.c_import_owners);
         return entry_ast;
     }
 
@@ -719,6 +929,17 @@ AstNode *bundle_modules(AstNode *entry_ast,
             goto cleanup;
         }
     }
+
+    /* Translate each c-import's `local` through its owning module's rename map
+     * so the wrapper binds to the same symbol the renamed QS source references. */
+    if (b.c_imports) {
+        for (size_t i = 0; i < b.c_imports->len; ++i) {
+            ModuleInfo *owner = b.c_import_owners[i];
+            const char *renamed = (const char *)map_get(&owner->rename_map, b.c_imports->items[i].local);
+            if (renamed) b.c_imports->items[i].local = renamed;
+        }
+    }
+
     for (size_t i = 0; i < b.order_len; ++i) {
         ModuleInfo *m = b.order[i];
         rename_walk(m->ast, &m->rename_map, NULL, NULL);
@@ -732,10 +953,12 @@ AstNode *bundle_modules(AstNode *entry_ast,
 
     if (out_err) memset(out_err, 0, sizeof *out_err);
     free(b.order);
+    free(b.c_import_owners);
     /* leak module bindings/exports/rename_map allocations — arena cleans up eventually */
     return bundle;
 
 cleanup:
     free(b.order);
+    free(b.c_import_owners);
     return NULL;
 }

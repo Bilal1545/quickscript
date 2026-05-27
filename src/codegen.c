@@ -1242,10 +1242,649 @@ static void collect_function_names(Codegen *c, AstNode *prog) {
     }
 }
 
+/* ---------- C-header import wrappers --------------------------------- */
+
+/* Each imported C function has a signature described by a compact DSL stored
+ * in C_FN_SIG_TABLE. The parser turns "v(i,i,s)" into a CSig of (return_type,
+ * arg_types[]); emit_c_wrapper walks that to generate marshaling glue.
+ *
+ * Type tokens (lowercase = primitive, UpperCamel = struct from C_STRUCT_TABLE):
+ *   v   void                 i   int                u   unsigned
+ *   l   long                 f   float              d   double
+ *   b   bool (uses js_truthy) c   signed char       uc  unsigned char
+ *   s   const char*          t   size_t             n   literal NULL ptr arg
+ *
+ * Unknown functions fall back to "d(d)" (single-double in/out) so most
+ * single-arg math.h functions still work without an explicit entry.
+ */
+
+typedef enum {
+    CT_VOID, CT_INT, CT_UINT, CT_LONG, CT_FLOAT, CT_DOUBLE,
+    CT_BOOL, CT_CHAR, CT_UCHAR, CT_STR, CT_SIZET, CT_NULL,
+    CT_STRUCT,
+} CType;
+
+typedef struct {
+    CType kind;
+    const char *struct_name; /* CT_STRUCT only — points into the sig string */
+} CTypeRef;
+
+typedef struct { const char *name; CTypeRef type; } CStructField;
+typedef struct {
+    const char *name;
+    const CStructField *fields;
+    int field_count;
+} CStructDef;
+
+#define MAX_C_ARGS 8
+typedef struct {
+    CTypeRef ret;
+    CTypeRef args[MAX_C_ARGS];
+    int argc;
+    bool ok;
+} CSig;
+
+/* ---- struct registry ---- */
+
+static const CStructField FIELDS_Color[]     = {
+    {"r", {CT_UCHAR, NULL}}, {"g", {CT_UCHAR, NULL}},
+    {"b", {CT_UCHAR, NULL}}, {"a", {CT_UCHAR, NULL}},
+};
+static const CStructField FIELDS_Vector2[]   = {
+    {"x", {CT_FLOAT, NULL}}, {"y", {CT_FLOAT, NULL}},
+};
+static const CStructField FIELDS_Vector3[]   = {
+    {"x", {CT_FLOAT, NULL}}, {"y", {CT_FLOAT, NULL}}, {"z", {CT_FLOAT, NULL}},
+};
+static const CStructField FIELDS_Vector4[]   = {
+    {"x", {CT_FLOAT, NULL}}, {"y", {CT_FLOAT, NULL}},
+    {"z", {CT_FLOAT, NULL}}, {"w", {CT_FLOAT, NULL}},
+};
+static const CStructField FIELDS_Rectangle[] = {
+    {"x", {CT_FLOAT, NULL}}, {"y", {CT_FLOAT, NULL}},
+    {"width", {CT_FLOAT, NULL}}, {"height", {CT_FLOAT, NULL}},
+};
+
+/* Alphabetically sorted for bsearch. */
+static const CStructDef C_STRUCT_TABLE[] = {
+    {"Color",     FIELDS_Color,     4},
+    {"Rectangle", FIELDS_Rectangle, 4},
+    {"Vector2",   FIELDS_Vector2,   2},
+    {"Vector3",   FIELDS_Vector3,   3},
+    {"Vector4",   FIELDS_Vector4,   4},
+};
+#define C_STRUCT_TABLE_LEN (sizeof C_STRUCT_TABLE / sizeof C_STRUCT_TABLE[0])
+
+static int struct_cmp(const void *a, const void *b) {
+    return strcmp(((const CStructDef *)a)->name, ((const CStructDef *)b)->name);
+}
+static const CStructDef *lookup_struct(const char *name) {
+    if (!name) return NULL;
+    CStructDef key = {name, NULL, 0};
+    return (const CStructDef *)bsearch(&key, C_STRUCT_TABLE, C_STRUCT_TABLE_LEN,
+                                        sizeof(CStructDef), struct_cmp);
+}
+
+/* ---- function signature table ---- */
+
+typedef struct { const char *name; const char *sig; } CFnSig;
+
+/* Keep alphabetically sorted for bsearch. */
+static const CFnSig C_FN_SIG_TABLE[] = {
+    /* raylib — core */
+    {"BeginDrawing",        "v()"},
+    {"ClearBackground",     "v(Color)"},
+    {"CloseWindow",         "v()"},
+    {"DrawCircle",          "v(i,i,f,Color)"},
+    {"DrawCircleV",         "v(Vector2,f,Color)"},
+    {"DrawFPS",             "v(i,i)"},
+    {"DrawLine",            "v(i,i,i,i,Color)"},
+    {"DrawPixel",           "v(i,i,Color)"},
+    {"DrawRectangle",       "v(i,i,i,i,Color)"},
+    {"DrawRectangleLines",  "v(i,i,i,i,Color)"},
+    {"DrawRectangleRec",    "v(Rectangle,Color)"},
+    {"DrawText",            "v(s,i,i,i,Color)"},
+    {"EndDrawing",          "v()"},
+    {"Fade",                "Color(Color,f)"},
+    {"GetColor",            "Color(u)"},
+    {"GetFPS",              "i()"},
+    {"GetFrameTime",        "f()"},
+    {"GetMousePosition",    "Vector2()"},
+    {"GetMouseX",           "i()"},
+    {"GetMouseY",           "i()"},
+    {"GetRandomValue",      "i(i,i)"},
+    {"GetScreenHeight",     "i()"},
+    {"GetScreenWidth",      "i()"},
+    {"GetTime",             "d()"},
+    {"InitWindow",          "v(i,i,s)"},
+    {"IsKeyDown",           "i(i)"},
+    {"IsKeyPressed",        "i(i)"},
+    {"IsMouseButtonDown",   "i(i)"},
+    {"IsMouseButtonPressed","i(i)"},
+    {"SetTargetFPS",        "v(i)"},
+    {"SetWindowTitle",      "v(s)"},
+    {"WindowShouldClose",   "i()"},
+
+    /* libc — math, stdio, stdlib, string, time */
+    {"abort",     "v()"},
+    {"abs",       "i(i)"},
+    {"acos",      "d(d)"},
+    {"acosh",     "d(d)"},
+    {"asin",      "d(d)"},
+    {"asinh",     "d(d)"},
+    {"atan",      "d(d)"},
+    {"atan2",     "d(d,d)"},
+    {"atanh",     "d(d)"},
+    {"atof",      "d(s)"},
+    {"atoi",      "i(s)"},
+    {"cbrt",      "d(d)"},
+    {"ceil",      "d(d)"},
+    {"copysign",  "d(d,d)"},
+    {"cos",       "d(d)"},
+    {"cosh",      "d(d)"},
+    {"exit",      "v(i)"},
+    {"exp",       "d(d)"},
+    {"exp2",      "d(d)"},
+    {"expm1",     "d(d)"},
+    {"fabs",      "d(d)"},
+    {"fdim",      "d(d,d)"},
+    {"floor",     "d(d)"},
+    {"fmax",      "d(d,d)"},
+    {"fmin",      "d(d,d)"},
+    {"fmod",      "d(d,d)"},
+    {"getchar",   "i()"},
+    {"hypot",     "d(d,d)"},
+    {"log",       "d(d)"},
+    {"log10",     "d(d)"},
+    {"log1p",     "d(d)"},
+    {"log2",      "d(d)"},
+    {"nearbyint", "d(d)"},
+    {"pow",       "d(d,d)"},
+    {"putchar",   "i(i)"},
+    {"puts",      "i(s)"},
+    {"rand",      "i()"},
+    {"remainder", "d(d,d)"},
+    {"rint",      "d(d)"},
+    {"round",     "d(d)"},
+    {"sin",       "d(d)"},
+    {"sinh",      "d(d)"},
+    {"sleep",     "u(u)"},
+    {"sqrt",      "d(d)"},
+    {"srand",     "v(u)"},
+    {"strcmp",    "i(s,s)"},
+    {"strlen",    "t(s)"},
+    {"system",    "i(s)"},
+    {"tan",       "d(d)"},
+    {"tanh",      "d(d)"},
+    {"time",      "l(n)"},
+    {"trunc",     "d(d)"},
+};
+#define C_FN_SIG_TABLE_LEN (sizeof C_FN_SIG_TABLE / sizeof C_FN_SIG_TABLE[0])
+
+static int c_fn_sig_cmp(const void *a, const void *b) {
+    return strcmp(((const CFnSig *)a)->name, ((const CFnSig *)b)->name);
+}
+static const char *lookup_c_fn_sig(const char *imported) {
+    if (!imported) return NULL;
+    CFnSig key = {imported, NULL};
+    const CFnSig *hit = (const CFnSig *)bsearch(&key, C_FN_SIG_TABLE, C_FN_SIG_TABLE_LEN,
+                                                 sizeof(CFnSig), c_fn_sig_cmp);
+    return hit ? hit->sig : NULL;
+}
+
+/* ---- C constant table ----
+ * Constants (macros, enum values, const ints) are imported by value: the
+ * compiler emits a one-shot builder that materializes the JsValue at
+ * runtime init. Each entry pairs a name with its CTypeRef DSL token (e.g.
+ * "Color" for a struct constant, "i" for an int, "d" for a double). */
+typedef struct { const char *name; const char *type; } CConstEntry;
+
+/* Alphabetically sorted (C-locale) for bsearch.
+ * Note: uppercase letters < '_' < lowercase in ASCII, so e.g. MAGENTA and
+ * MOUSE_BUTTON_* come *before* M_E, M_PI, etc. */
+static const CConstEntry C_CONST_TABLE[] = {
+    /* raylib colors */
+    {"BEIGE",     "Color"},
+    {"BLACK",     "Color"},
+    {"BLANK",     "Color"},
+    {"BLUE",      "Color"},
+    {"BROWN",     "Color"},
+    {"DARKBLUE",  "Color"},
+    {"DARKBROWN", "Color"},
+    {"DARKGRAY",  "Color"},
+    {"DARKGREEN", "Color"},
+    {"DARKPURPLE","Color"},
+    {"GOLD",      "Color"},
+    {"GRAY",      "Color"},
+    {"GREEN",     "Color"},
+
+    /* raylib keyboard keys (KeyboardKey enum) */
+    {"KEY_A",            "i"},
+    {"KEY_APOSTROPHE",   "i"},
+    {"KEY_B",            "i"},
+    {"KEY_BACKSLASH",    "i"},
+    {"KEY_BACKSPACE",    "i"},
+    {"KEY_C",            "i"},
+    {"KEY_CAPS_LOCK",    "i"},
+    {"KEY_COMMA",        "i"},
+    {"KEY_D",            "i"},
+    {"KEY_DELETE",       "i"},
+    {"KEY_DOWN",         "i"},
+    {"KEY_E",            "i"},
+    {"KEY_END",          "i"},
+    {"KEY_ENTER",        "i"},
+    {"KEY_EQUAL",        "i"},
+    {"KEY_ESCAPE",       "i"},
+    {"KEY_F",            "i"},
+    {"KEY_F1",           "i"},
+    {"KEY_F10",          "i"},
+    {"KEY_F11",          "i"},
+    {"KEY_F12",          "i"},
+    {"KEY_F2",           "i"},
+    {"KEY_F3",           "i"},
+    {"KEY_F4",           "i"},
+    {"KEY_F5",           "i"},
+    {"KEY_F6",           "i"},
+    {"KEY_F7",           "i"},
+    {"KEY_F8",           "i"},
+    {"KEY_F9",           "i"},
+    {"KEY_G",            "i"},
+    {"KEY_GRAVE",        "i"},
+    {"KEY_H",            "i"},
+    {"KEY_HOME",         "i"},
+    {"KEY_I",            "i"},
+    {"KEY_INSERT",       "i"},
+    {"KEY_J",            "i"},
+    {"KEY_K",            "i"},
+    {"KEY_L",            "i"},
+    {"KEY_LEFT",         "i"},
+    {"KEY_LEFT_ALT",     "i"},
+    {"KEY_LEFT_BRACKET", "i"},
+    {"KEY_LEFT_CONTROL", "i"},
+    {"KEY_LEFT_SHIFT",   "i"},
+    {"KEY_LEFT_SUPER",   "i"},
+    {"KEY_M",            "i"},
+    {"KEY_MINUS",        "i"},
+    {"KEY_N",            "i"},
+    {"KEY_NUM_LOCK",     "i"},
+    {"KEY_O",            "i"},
+    {"KEY_P",            "i"},
+    {"KEY_PAGE_DOWN",    "i"},
+    {"KEY_PAGE_UP",      "i"},
+    {"KEY_PAUSE",        "i"},
+    {"KEY_PERIOD",       "i"},
+    {"KEY_PRINT_SCREEN", "i"},
+    {"KEY_Q",            "i"},
+    {"KEY_R",            "i"},
+    {"KEY_RIGHT",        "i"},
+    {"KEY_RIGHT_ALT",    "i"},
+    {"KEY_RIGHT_BRACKET","i"},
+    {"KEY_RIGHT_CONTROL","i"},
+    {"KEY_RIGHT_SHIFT",  "i"},
+    {"KEY_RIGHT_SUPER",  "i"},
+    {"KEY_S",            "i"},
+    {"KEY_SCROLL_LOCK",  "i"},
+    {"KEY_SEMICOLON",    "i"},
+    {"KEY_SLASH",        "i"},
+    {"KEY_SPACE",        "i"},
+    {"KEY_T",            "i"},
+    {"KEY_TAB",          "i"},
+    {"KEY_U",            "i"},
+    {"KEY_UP",           "i"},
+    {"KEY_V",            "i"},
+    {"KEY_W",            "i"},
+    {"KEY_X",            "i"},
+    {"KEY_Y",            "i"},
+    {"KEY_Z",            "i"},
+
+    /* more colors */
+    {"LIGHTGRAY", "Color"},
+    {"LIME",      "Color"},
+    {"MAGENTA",   "Color"},
+    {"MAROON",    "Color"},
+
+    /* raylib mouse buttons — fall here because uppercase letters sort
+     * before '_' (MOUSE_… < M_…). */
+    {"MOUSE_BUTTON_BACK",    "i"},
+    {"MOUSE_BUTTON_EXTRA",   "i"},
+    {"MOUSE_BUTTON_FORWARD", "i"},
+    {"MOUSE_BUTTON_LEFT",    "i"},
+    {"MOUSE_BUTTON_MIDDLE",  "i"},
+    {"MOUSE_BUTTON_RIGHT",   "i"},
+    {"MOUSE_BUTTON_SIDE",    "i"},
+
+    /* libc math (math.h) constants */
+    {"M_E",       "d"},
+    {"M_LN10",    "d"},
+    {"M_LN2",     "d"},
+    {"M_LOG10E",  "d"},
+    {"M_LOG2E",   "d"},
+    {"M_PI",      "d"},
+    {"M_PI_2",    "d"},
+    {"M_PI_4",    "d"},
+    {"M_SQRT1_2", "d"},
+    {"M_SQRT2",   "d"},
+
+    /* remaining colors */
+    {"ORANGE",    "Color"},
+    {"PINK",      "Color"},
+    {"PURPLE",    "Color"},
+    {"RAYWHITE",  "Color"},
+    {"RED",       "Color"},
+    {"SKYBLUE",   "Color"},
+    {"VIOLET",    "Color"},
+    {"WHITE",     "Color"},
+    {"YELLOW",    "Color"},
+};
+#define C_CONST_TABLE_LEN (sizeof C_CONST_TABLE / sizeof C_CONST_TABLE[0])
+
+static int c_const_cmp(const void *a, const void *b) {
+    return strcmp(((const CConstEntry *)a)->name, ((const CConstEntry *)b)->name);
+}
+static const char *lookup_c_const(const char *imported) {
+    if (!imported) return NULL;
+    CConstEntry key = {imported, NULL};
+    const CConstEntry *hit = (const CConstEntry *)bsearch(&key, C_CONST_TABLE, C_CONST_TABLE_LEN,
+                                                           sizeof(CConstEntry), c_const_cmp);
+    return hit ? hit->type : NULL;
+}
+
+/* ---- signature parser ---- */
+
+static const char *skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+static bool is_name_start(char c) { return (c >= 'A' && c <= 'Z'); }
+static bool is_name_cont(char c)  {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool parse_ctyperef(Arena *arena, const char **pp, CTypeRef *out) {
+    const char *p = skip_ws(*pp);
+    if (!*p) return false;
+
+    /* Struct: starts with uppercase. */
+    if (is_name_start(*p)) {
+        const char *start = p;
+        while (is_name_cont(*p)) p++;
+        if (p == start) return false;
+        out->kind = CT_STRUCT;
+        out->struct_name = arena_strndup(arena, start, p - start);
+        *pp = p;
+        return true;
+    }
+
+    /* Two-letter primitives first so we don't mis-parse "uc" as "u" then "c". */
+    if (p[0] == 'u' && p[1] == 'c') { out->kind = CT_UCHAR; out->struct_name = NULL; *pp = p + 2; return true; }
+
+    out->struct_name = NULL;
+    switch (*p) {
+        case 'v': out->kind = CT_VOID;   break;
+        case 'i': out->kind = CT_INT;    break;
+        case 'u': out->kind = CT_UINT;   break;
+        case 'l': out->kind = CT_LONG;   break;
+        case 'f': out->kind = CT_FLOAT;  break;
+        case 'd': out->kind = CT_DOUBLE; break;
+        case 'b': out->kind = CT_BOOL;   break;
+        case 'c': out->kind = CT_CHAR;   break;
+        case 's': out->kind = CT_STR;    break;
+        case 't': out->kind = CT_SIZET;  break;
+        case 'n': out->kind = CT_NULL;   break;
+        default: return false;
+    }
+    *pp = p + 1;
+    return true;
+}
+
+static bool parse_csig(Arena *arena, const char *sig, CSig *out) {
+    memset(out, 0, sizeof *out);
+    const char *p = sig;
+    if (!parse_ctyperef(arena, &p, &out->ret)) return false;
+    p = skip_ws(p);
+    if (*p != '(') return false;
+    p++;
+    p = skip_ws(p);
+    if (*p == ')') { out->ok = true; return true; }
+    while (1) {
+        if (out->argc >= MAX_C_ARGS) return false;
+        if (!parse_ctyperef(arena, &p, &out->args[out->argc])) return false;
+        out->argc++;
+        p = skip_ws(p);
+        if (*p == ',') { p++; continue; }
+        if (*p == ')') { out->ok = true; return true; }
+        return false;
+    }
+}
+
+/* ---- wrapper emission ---- */
+
+static const char *c_type_decl(const CTypeRef *t) {
+    switch (t->kind) {
+        case CT_VOID:   return "void";
+        case CT_INT:    return "int";
+        case CT_UINT:   return "unsigned";
+        case CT_LONG:   return "long";
+        case CT_FLOAT:  return "float";
+        case CT_DOUBLE: return "double";
+        case CT_BOOL:   return "int";
+        case CT_CHAR:   return "char";
+        case CT_UCHAR:  return "unsigned char";
+        case CT_STR:    return "const char*";
+        case CT_SIZET:  return "size_t";
+        case CT_NULL:   return "void*";
+        case CT_STRUCT: return t->struct_name;
+    }
+    return "int";
+}
+
+/* Emit a JS-value-to-C-scalar conversion expression. */
+static void emit_to_c_scalar(Buffer *out, const CTypeRef *t, const char *jsexpr) {
+    switch (t->kind) {
+        case CT_INT:    buf_appendf(out, "(int)js_to_number(%s)", jsexpr); break;
+        case CT_UINT:   buf_appendf(out, "(unsigned)js_to_number(%s)", jsexpr); break;
+        case CT_LONG:   buf_appendf(out, "(long)js_to_number(%s)", jsexpr); break;
+        case CT_FLOAT:  buf_appendf(out, "(float)js_to_number(%s)", jsexpr); break;
+        case CT_DOUBLE: buf_appendf(out, "js_to_number(%s)", jsexpr); break;
+        case CT_BOOL:   buf_appendf(out, "(js_truthy(%s) ? 1 : 0)", jsexpr); break;
+        case CT_CHAR:   buf_appendf(out, "(char)js_to_number(%s)", jsexpr); break;
+        case CT_UCHAR:  buf_appendf(out, "(unsigned char)js_to_number(%s)", jsexpr); break;
+        case CT_SIZET:  buf_appendf(out, "(size_t)js_to_number(%s)", jsexpr); break;
+        default: buf_append_str(out, "0"); break;
+    }
+}
+
+/* Emit the C-to-JS-value wrapping expression for a scalar result. */
+static void emit_from_c_scalar(Buffer *out, const CTypeRef *t, const char *cexpr) {
+    switch (t->kind) {
+        case CT_INT: case CT_UINT: case CT_LONG: case CT_BOOL:
+        case CT_CHAR: case CT_UCHAR: case CT_SIZET:
+            buf_appendf(out, "js_number((double)(%s))", cexpr); break;
+        case CT_FLOAT:
+            buf_appendf(out, "js_number((double)(%s))", cexpr); break;
+        case CT_DOUBLE:
+            buf_appendf(out, "js_number(%s)", cexpr); break;
+        case CT_STR:
+            buf_appendf(out, "((%s) ? js_string(%s) : js_null())", cexpr, cexpr); break;
+        default:
+            buf_append_str(out, "js_undefined()"); break;
+    }
+}
+
+/* Generate `static JsValue* _c_<local>(...) { ... }` for one C import. */
+static void emit_c_wrapper_sig(Buffer *out, const char *local, const char *imported,
+                                const CSig *sig) {
+    buf_appendf(out, "static JsValue* _c_%s(JsValue** _a, int _ac) {\n", local);
+    buf_append_str(out, "    (void)_a; (void)_ac;\n");
+
+    /* Marshal each argument into a local C variable `_arg<i>`. */
+    for (int i = 0; i < sig->argc; ++i) {
+        const CTypeRef *t = &sig->args[i];
+        if (t->kind == CT_NULL) {
+            buf_appendf(out, "    void* _arg%d = NULL;\n", i);
+            continue;
+        }
+        if (t->kind == CT_STR) {
+            buf_appendf(out,
+                "    char* _arg%d = (_ac > %d) ? js_to_string(_a[%d]) : NULL;\n",
+                i, i, i);
+            continue;
+        }
+        if (t->kind == CT_STRUCT) {
+            const CStructDef *def = lookup_struct(t->struct_name);
+            buf_appendf(out, "    %s _arg%d = (%s){0};\n",
+                        t->struct_name, i, t->struct_name);
+            if (def) {
+                buf_appendf(out, "    if (_ac > %d && _a[%d]->type == JS_OBJECT) {\n", i, i);
+                buf_appendf(out, "        JsValue* _o = _a[%d];\n", i);
+                for (int f = 0; f < def->field_count; ++f) {
+                    const CStructField *fld = &def->fields[f];
+                    char tmp[128];
+                    snprintf(tmp, sizeof tmp, "js_object_get(_o, \"%s\")", fld->name);
+                    buf_appendf(out, "        _arg%d.%s = ", i, fld->name);
+                    emit_to_c_scalar(out, &fld->type, tmp);
+                    buf_append_str(out, ";\n");
+                }
+                buf_append_str(out, "    }\n");
+            }
+            continue;
+        }
+        /* Plain scalars (int, double, ...). */
+        buf_appendf(out, "    %s _arg%d = (_ac > %d) ? ",
+                    c_type_decl(t), i, i);
+        {
+            char tmp[32];
+            snprintf(tmp, sizeof tmp, "_a[%d]", i);
+            emit_to_c_scalar(out, t, tmp);
+        }
+        buf_appendf(out, " : (%s)0;\n", c_type_decl(t));
+    }
+
+    /* Build the call. Capture into `_ret` unless return is void. */
+    bool ret_void = (sig->ret.kind == CT_VOID);
+    bool ret_struct = (sig->ret.kind == CT_STRUCT);
+    if (ret_void) {
+        buf_appendf(out, "    %s(", imported);
+    } else if (ret_struct) {
+        buf_appendf(out, "    %s _ret = %s(", sig->ret.struct_name, imported);
+    } else {
+        buf_appendf(out, "    %s _ret = %s(", c_type_decl(&sig->ret), imported);
+    }
+    for (int i = 0; i < sig->argc; ++i) {
+        if (i) buf_append_str(out, ", ");
+        buf_appendf(out, "_arg%d", i);
+    }
+    buf_append_str(out, ");\n");
+
+    /* Free any js_to_string-allocated argument buffers. */
+    for (int i = 0; i < sig->argc; ++i) {
+        if (sig->args[i].kind == CT_STR) {
+            buf_appendf(out, "    free(_arg%d);\n", i);
+        }
+    }
+
+    /* Marshal the result. */
+    if (ret_void) {
+        buf_append_str(out, "    return js_undefined();\n");
+    } else if (ret_struct) {
+        const CStructDef *def = lookup_struct(sig->ret.struct_name);
+        buf_append_str(out, "    JsValue* _ro = js_object_new();\n");
+        if (def) {
+            for (int f = 0; f < def->field_count; ++f) {
+                const CStructField *fld = &def->fields[f];
+                char tmp[128];
+                snprintf(tmp, sizeof tmp, "_ret.%s", fld->name);
+                buf_appendf(out, "    js_object_set(_ro, \"%s\", ", fld->name);
+                emit_from_c_scalar(out, &fld->type, tmp);
+                buf_append_str(out, ");\n");
+            }
+        }
+        buf_append_str(out, "    return _ro;\n");
+    } else {
+        buf_append_str(out, "    return ");
+        emit_from_c_scalar(out, &sig->ret, "_ret");
+        buf_append_str(out, ";\n");
+    }
+
+    buf_append_str(out, "}\n");
+}
+
+/* Emit a one-shot `static JsValue* _c_const_<local>(void)` builder that
+ * materializes a C constant (macro / enum / const variable) as a JsValue. */
+static void emit_const_builder(Buffer *out, const char *local, const char *imported,
+                                const CTypeRef *t) {
+    buf_appendf(out, "static JsValue* _c_const_%s(void) {\n", local);
+    if (t->kind == CT_STRUCT) {
+        const CStructDef *def = lookup_struct(t->struct_name);
+        /* Copy into a local first — compound-literal macros (raylib's
+         * `(Color){...}`) are rvalues, so going through `_v` keeps the
+         * field-access form uniform. */
+        buf_appendf(out, "    %s _v = %s;\n", t->struct_name, imported);
+        buf_append_str(out, "    JsValue* _o = js_object_new();\n");
+        if (def) {
+            for (int f = 0; f < def->field_count; ++f) {
+                const CStructField *fld = &def->fields[f];
+                char tmp[128];
+                snprintf(tmp, sizeof tmp, "_v.%s", fld->name);
+                buf_appendf(out, "    js_object_set(_o, \"%s\", ", fld->name);
+                emit_from_c_scalar(out, &fld->type, tmp);
+                buf_append_str(out, ");\n");
+            }
+        }
+        buf_append_str(out, "    return _o;\n");
+    } else if (t->kind == CT_NULL) {
+        buf_append_str(out, "    return js_null();\n");
+    } else if (t->kind == CT_STR) {
+        buf_appendf(out, "    const char* _v = %s;\n", imported);
+        buf_append_str(out, "    return _v ? js_string(_v) : js_null();\n");
+    } else {
+        buf_append_str(out, "    return ");
+        emit_from_c_scalar(out, t, imported);
+        buf_append_str(out, ";\n");
+    }
+    buf_append_str(out, "}\n");
+}
+
+/* Classification of a C import — function (with sig) or constant (with type). */
+typedef enum { CI_FN, CI_CONST } CImportKind;
+
+typedef struct {
+    CImportKind kind;
+    CSig sig;          /* valid when kind == CI_FN */
+    CTypeRef type;     /* valid when kind == CI_CONST */
+} CImportResolved;
+
+static void resolve_c_import(Arena *arena, const char *imported, CImportResolved *out) {
+    memset(out, 0, sizeof *out);
+    const char *sig = lookup_c_fn_sig(imported);
+    if (sig) {
+        out->kind = CI_FN;
+        if (!parse_csig(arena, sig, &out->sig)) parse_csig(arena, "d(d)", &out->sig);
+        return;
+    }
+    const char *ctype = lookup_c_const(imported);
+    if (ctype) {
+        out->kind = CI_CONST;
+        const char *p = ctype;
+        if (!parse_ctyperef(arena, &p, &out->type)) {
+            /* Malformed constant type — treat as int. */
+            out->type.kind = CT_INT;
+            out->type.struct_name = NULL;
+        }
+        return;
+    }
+    /* Unknown — assume single-arg double function (covers most math.h). */
+    out->kind = CI_FN;
+    parse_csig(arena, "d(d)", &out->sig);
+}
+
 /* ---------- top-level ------------------------------------------------ */
 
 char *codegen_generate(AstNode *program, const char *source, size_t source_len,
-                       const char *filename, Arena *arena, CodegenError *out_err) {
+                       const char *filename, Arena *arena, CodegenError *out_err,
+                       const CImportList *c_imports) {
     Codegen c;
     memset(&c, 0, sizeof c);
     c.arena = arena;
@@ -1257,6 +1896,34 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
     buf_init(&c.lambdas);
     buf_init(&c.fns);
     buf_init(&c.main_body);
+
+    /* Register c-import bindings as globals + emit wrappers or const builders.
+     * Wrappers live in `c.fns` so they appear before main(). Dedupe by `local`
+     * since two modules importing the same C symbol unaliased share a binding.
+     *
+     * Resolution map (local -> CImportResolved*) is reused in main() init. */
+    Map seen_c_locals;
+    Map cimport_resolved;       /* local -> CImportResolved* (arena-allocated) */
+    map_init(&seen_c_locals);
+    map_init(&cimport_resolved);
+    if (c_imports) {
+        for (size_t i = 0; i < c_imports->len; ++i) {
+            const CImport *ci = &c_imports->items[i];
+            if (map_has(&seen_c_locals, ci->local)) continue;
+            map_put(&seen_c_locals, ci->local, (void *)1);
+            map_put(&c.globals, arena_strdup(c.arena, ci->local), (void *)1);
+
+            CImportResolved *res = (CImportResolved *)arena_alloc(c.arena, sizeof *res);
+            resolve_c_import(c.arena, ci->imported, res);
+            map_put(&cimport_resolved, arena_strdup(c.arena, ci->local), res);
+
+            if (res->kind == CI_FN) {
+                emit_c_wrapper_sig(&c.fns, ci->local, ci->imported, &res->sig);
+            } else {
+                emit_const_builder(&c.fns, ci->local, ci->imported, &res->type);
+            }
+        }
+    }
 
     collect_function_names(&c, program);
 
@@ -1276,7 +1943,46 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
 
     /* Assemble final output */
     Buffer final; buf_init(&final);
-    buf_append_str(&final, "#include \"runtime.h\"\n\n");
+    buf_append_str(&final, "#include \"runtime.h\"\n");
+
+    /* C-header imports: emit `#include <hdr>` for each unique header. */
+    if (c_imports && c_imports->len) {
+        Map seen; map_init(&seen);
+        for (size_t i = 0; i < c_imports->len; ++i) {
+            const char *h = c_imports->items[i].header;
+            if (map_has(&seen, h)) continue;
+            map_put(&seen, h, (void *)1);
+            buf_appendf(&final, "#include <%s>\n", h);
+        }
+        map_free(&seen);
+    }
+    buf_append_char(&final, '\n');
+
+    /* C-import wrappers go FIRST, before any QS bindings, so they can freely
+     * use raylib (and other) macro constants without interference. After the
+     * wrappers we `#undef` every QS-visible identifier so the QS code below
+     * isn't text-mangled by collisions like raylib.h's `RAYWHITE`. */
+    if (c.fns.data) buf_append_str(&final, c.fns.data);
+    buf_append_char(&final, '\n');
+
+    {
+        Map undef_seen; map_init(&undef_seen);
+        size_t it; const char *k; void *v;
+        it = 0;
+        while (map_iter(&c.known_functions, &it, &k, &v)) {
+            if (map_has(&undef_seen, k)) continue;
+            map_put(&undef_seen, k, (void *)1);
+            buf_appendf(&final, "#ifdef %s\n#undef %s\n#endif\n", k, k);
+        }
+        it = 0;
+        while (map_iter(&c.globals, &it, &k, &v)) {
+            if (map_has(&undef_seen, k)) continue;
+            map_put(&undef_seen, k, (void *)1);
+            buf_appendf(&final, "#ifdef %s\n#undef %s\n#endif\n", k, k);
+        }
+        map_free(&undef_seen);
+    }
+    buf_append_char(&final, '\n');
 
     /* Forward declarations */
     {
@@ -1300,13 +2006,26 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
     if (c.lambdas.data) buf_append_str(&final, c.lambdas.data);
     buf_append_char(&final, '\n');
 
-    /* Function declarations */
-    if (c.fns.data) buf_append_str(&final, c.fns.data);
-    buf_append_char(&final, '\n');
-
     /* main() */
     buf_append_str(&final, "int main(void) {\n");
     buf_append_str(&final, "js_runtime_init();\n");
+    /* Bind c-import locals before user code runs. Dedupe via seen_c_locals. */
+    if (c_imports) {
+        Map seen_init;
+        map_init(&seen_init);
+        for (size_t i = 0; i < c_imports->len; ++i) {
+            const CImport *ci = &c_imports->items[i];
+            if (map_has(&seen_init, ci->local)) continue;
+            map_put(&seen_init, ci->local, (void *)1);
+            CImportResolved *res = (CImportResolved *)map_get(&cimport_resolved, ci->local);
+            if (res && res->kind == CI_CONST) {
+                buf_appendf(&final, "%s = _c_const_%s();\n", ci->local, ci->local);
+            } else {
+                buf_appendf(&final, "%s = js_function(_c_%s);\n", ci->local, ci->local);
+            }
+        }
+        map_free(&seen_init);
+    }
     if (c.main_body.data) buf_append_str(&final, c.main_body.data);
     buf_append_str(&final, "return 0;\n}\n");
 
@@ -1316,6 +2035,8 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
     buf_free(&c.main_body);
     map_free(&c.known_functions);
     map_free(&c.globals);
+    map_free(&seen_c_locals);
+    map_free(&cimport_resolved);
     free(c.ctx_stack);
     if (out_err) memset(out_err, 0, sizeof *out_err);
     return out;
@@ -1327,6 +2048,8 @@ fail:
     buf_free(&c.main_body);
     map_free(&c.known_functions);
     map_free(&c.globals);
+    map_free(&seen_c_locals);
+    map_free(&cimport_resolved);
     free(c.ctx_stack);
     return NULL;
 }

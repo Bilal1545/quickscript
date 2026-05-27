@@ -85,8 +85,12 @@ static void emit_err(QscErrorType type, const char *file, const char *msg,
 
 /* ---- pipeline: parse → bundle → codegen ----------------------------- */
 
-/* Returns C source string (caller frees) or NULL on failure. */
-static char *compile_to_c(const char *input_path, char **out_source, size_t *out_len) {
+/* Returns C source string (caller frees) or NULL on failure.
+ * `link_libs` may be NULL (no scan output) or pre-populated by the caller
+ * with CLI -l flags; the bundler appends `// @link` directives discovered
+ * across all bundled sources. */
+static char *compile_to_c(const char *input_path, char **out_source, size_t *out_len,
+                          LinkList *link_libs) {
     size_t len = 0;
     char *src = read_file(input_path, &len);
     if (!src) return NULL;
@@ -100,11 +104,19 @@ static char *compile_to_c(const char *input_path, char **out_source, size_t *out
     AstNode *prog = parse_source(src, len, input_path, &a, &perr);
     if (!prog) { emit_err(QSC_ERR_PARSE, input_path, perr.message, perr.line, perr.col, src, len); arena_free(&a); return NULL; }
 
-    AstNode *bundled = bundle_modules(prog, src, len, input_path, &a, &perr);
-    if (!bundled) { emit_err(QSC_ERR_PARSE, input_path, perr.message, perr.line, perr.col, src, len); arena_free(&a); return NULL; }
+    CImportList c_imports;
+    cimport_list_init(&c_imports);
+    AstNode *bundled = bundle_modules(prog, src, len, input_path, &a, &perr, &c_imports, link_libs);
+    if (!bundled) {
+        emit_err(QSC_ERR_PARSE, input_path, perr.message, perr.line, perr.col, src, len);
+        cimport_list_free(&c_imports);
+        arena_free(&a);
+        return NULL;
+    }
 
     CodegenError cerr = {0};
-    char *c_src = codegen_generate(bundled, src, len, input_path, &a, &cerr);
+    char *c_src = codegen_generate(bundled, src, len, input_path, &a, &cerr, &c_imports);
+    cimport_list_free(&c_imports);
     if (!c_src) { emit_err(QSC_ERR_CODEGEN, input_path, cerr.message, cerr.line, cerr.col, src, len); arena_free(&a); return NULL; }
 
     /* Note: we leak the arena across builds intentionally; main exits afterward. */
@@ -113,19 +125,47 @@ static char *compile_to_c(const char *input_path, char **out_source, size_t *out
 
 /* ---- gcc invocation -------------------------------------------------- */
 
-static int run_gcc(const char *c_path, const char *out_path) {
+static int run_gcc(const char *c_path, const char *out_path, const LinkList *extra_libs) {
     const char *rt = runtime_c_path();
+    char include_flag[1024];
+    snprintf(include_flag, sizeof include_flag, "-I%s", runtime_dir());
+
+    /* Build argv dynamically so we can append `-l<name>` for each extra lib. */
+    size_t extras = extra_libs ? extra_libs->len : 0;
+    size_t fixed = 8;  /* gcc, -o, out, -I..., c_path, rt, -lm, -w */
+    char **argv = (char **)calloc(fixed + extras + 1, sizeof(char *));
+    if (!argv) { fprintf(stderr, "qsc: oom\n"); return 1; }
+    size_t k = 0;
+    argv[k++] = "gcc";
+    argv[k++] = "-o";
+    argv[k++] = (char *)out_path;
+    argv[k++] = include_flag;
+    argv[k++] = (char *)c_path;
+    argv[k++] = (char *)rt;
+    argv[k++] = "-lm";
+    argv[k++] = "-w";
+    for (size_t i = 0; i < extras; ++i) {
+        const char *name = extra_libs->items[i];
+        size_t nl = strlen(name);
+        char *flag = (char *)malloc(nl + 3);
+        if (!flag) { fprintf(stderr, "qsc: oom\n"); free(argv); return 1; }
+        flag[0] = '-'; flag[1] = 'l';
+        memcpy(flag + 2, name, nl + 1);
+        argv[k++] = flag;
+    }
+    argv[k] = NULL;
+
     pid_t pid = fork();
-    if (pid < 0) { fprintf(stderr, "qsc: fork failed: %s\n", strerror(errno)); return 1; }
+    if (pid < 0) { fprintf(stderr, "qsc: fork failed: %s\n", strerror(errno)); free(argv); return 1; }
     if (pid == 0) {
-        char include_flag[1024];
-        snprintf(include_flag, sizeof include_flag, "-I%s", runtime_dir());
-        execlp("gcc", "gcc", "-o", out_path, include_flag, c_path, rt, "-lm", "-w", (char *)NULL);
+        execvp("gcc", argv);
         fprintf(stderr, "qsc: cannot exec gcc: %s\n", strerror(errno));
         _exit(127);
     }
     int status = 0;
     waitpid(pid, &status, 0);
+    /* Leak the -l<name> strings — process is about to exit anyway. */
+    free(argv);
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 0;
     QscError e = {.type = QSC_ERR_BUILD, .message = "gcc invocation failed", .file = NULL};
     fputs(C_RED, stderr);
@@ -160,7 +200,9 @@ static int write_string_to(const char *path, const char *content) {
 
 static int mode_emit_c(const char *input, const char *output) {
     char *src; size_t len;
-    char *c = compile_to_c(input, &src, &len);
+    LinkList libs; link_list_init(&libs);
+    char *c = compile_to_c(input, &src, &len, &libs);
+    link_list_free(&libs);
     free(src);
     if (!c) return 1;
     int rc = write_string_to(output ? output : "out.c", c);
@@ -184,15 +226,21 @@ static void default_output_name(const char *input, char *out, size_t out_size) {
     out[n] = '\0';
 }
 
-static int mode_build(const char *input, const char *output, bool then_run) {
+static int mode_build(const char *input, const char *output, bool then_run,
+                      const LinkList *cli_libs) {
     char *src; size_t len;
-    char *c = compile_to_c(input, &src, &len);
+    LinkList libs; link_list_init(&libs);
+    /* Seed with CLI -l flags so they appear before scanned directives. */
+    if (cli_libs) {
+        for (size_t i = 0; i < cli_libs->len; ++i) link_list_add(&libs, cli_libs->items[i]);
+    }
+    char *c = compile_to_c(input, &src, &len, &libs);
     free(src);
-    if (!c) return 1;
+    if (!c) { link_list_free(&libs); return 1; }
 
     char tmpl[] = "/tmp/qsc-XXXXXX.c";
     int fd = mkstemps(tmpl, 2);
-    if (fd < 0) { fprintf(stderr, "qsc: mkstemps failed: %s\n", strerror(errno)); free(c); return 1; }
+    if (fd < 0) { fprintf(stderr, "qsc: mkstemps failed: %s\n", strerror(errno)); free(c); link_list_free(&libs); return 1; }
     write(fd, c, strlen(c));
     close(fd);
     free(c);
@@ -203,7 +251,8 @@ static int mode_build(const char *input, const char *output, bool then_run) {
         output = default_name;
     }
     const char *out = output;
-    int rc = run_gcc(tmpl, out);
+    int rc = run_gcc(tmpl, out, &libs);
+    link_list_free(&libs);
     unlink(tmpl);
     if (rc != 0) return rc;
 
@@ -257,7 +306,7 @@ static int mode_dump_ast(const char *path) {
     ParseError err = {0};
     AstNode *prog = parse_source(src, len, path, &a, &err);
     if (!prog) { emit_err(QSC_ERR_PARSE, path, err.message, err.line, err.col, src, len); arena_free(&a); free(src); return 1; }
-    AstNode *bundled = bundle_modules(prog, src, len, path, &a, &err);
+    AstNode *bundled = bundle_modules(prog, src, len, path, &a, &err, NULL, NULL);
     if (!bundled) { emit_err(QSC_ERR_PARSE, path, err.message, err.line, err.col, src, len); arena_free(&a); free(src); return 1; }
     AstPrintCtx ctx = {0};
     AstVisitor v = {.user = &ctx, .enter = ast_print_enter, .leave = ast_print_leave};
@@ -344,6 +393,11 @@ static void print_usage(FILE *f) {
         "  qsc -S file.qs -o -         emit generated C to stdout\n"
         "  qsc --run file.qs           build and run\n"
         "\n"
+        "Link flags:\n"
+        "  -l<name>  /  -l <name>      link against lib<name> (repeatable)\n"
+        "  --link <name>               same as -l <name>\n"
+        "  Sources may also include `// @link raylib GL pthread` directives.\n"
+        "\n"
         "Debug subcommands:\n"
         "  qsc --ast file.qs           dump AST after parse + bundle\n"
         "  qsc --tokens file.qs        dump lexer tokens\n"
@@ -366,32 +420,46 @@ int main(int argc, char **argv) {
     bool dump_tokens = false;
     const char *output = NULL;
     const char *input = NULL;
+    LinkList cli_libs; link_list_init(&cli_libs);
 
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
-        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { print_usage(stdout); return 0; }
-        if (strcmp(a, "--self-test") == 0) return run_self_test();
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { print_usage(stdout); link_list_free(&cli_libs); return 0; }
+        if (strcmp(a, "--self-test") == 0) { link_list_free(&cli_libs); return run_self_test(); }
         if (strcmp(a, "-S") == 0 || strcmp(a, "-c") == 0) { emit_c_only = true; continue; }
         if (strcmp(a, "--run") == 0) { then_run = true; continue; }
         if (strcmp(a, "--ast") == 0) { dump_ast = true; continue; }
         if (strcmp(a, "--tokens") == 0) { dump_tokens = true; continue; }
         if (strcmp(a, "-o") == 0) {
-            if (i + 1 >= argc) { fprintf(stderr, "qsc: -o needs an argument\n"); return 2; }
+            if (i + 1 >= argc) { fprintf(stderr, "qsc: -o needs an argument\n"); link_list_free(&cli_libs); return 2; }
             output = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--link") == 0 || strcmp(a, "-l") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "qsc: %s needs an argument\n", a); link_list_free(&cli_libs); return 2; }
+            link_list_add(&cli_libs, argv[++i]);
+            continue;
+        }
+        if (a[0] == '-' && a[1] == 'l' && a[2] != '\0') {  /* -lname (gcc-style) */
+            link_list_add(&cli_libs, a + 2);
             continue;
         }
         if (a[0] == '-' && a[1] != '\0') {
             fprintf(stderr, "qsc: unknown option '%s' (try --help)\n", a);
+            link_list_free(&cli_libs);
             return 2;
         }
-        if (input) { fprintf(stderr, "qsc: multiple input files not supported\n"); return 2; }
+        if (input) { fprintf(stderr, "qsc: multiple input files not supported\n"); link_list_free(&cli_libs); return 2; }
         input = a;
     }
 
-    if (!input) { fprintf(stderr, "qsc: no input file\n"); print_usage(stderr); return 2; }
+    if (!input) { fprintf(stderr, "qsc: no input file\n"); print_usage(stderr); link_list_free(&cli_libs); return 2; }
 
-    if (dump_tokens) return mode_dump_tokens(input);
-    if (dump_ast)    return mode_dump_ast(input);
-    if (emit_c_only) return mode_emit_c(input, output);
-    return mode_build(input, output, then_run);
+    int rc;
+    if (dump_tokens) rc = mode_dump_tokens(input);
+    else if (dump_ast) rc = mode_dump_ast(input);
+    else if (emit_c_only) rc = mode_emit_c(input, output);
+    else rc = mode_build(input, output, then_run, &cli_libs);
+    link_list_free(&cli_libs);
+    return rc;
 }

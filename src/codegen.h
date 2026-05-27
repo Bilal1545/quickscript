@@ -19,6 +19,7 @@
 #include "ast.h"
 #include "buffer.h"
 #include "map.h"
+#include "modules.h"
 
 typedef struct {
     char message[256];
@@ -63,8 +64,11 @@ typedef struct {
 } Codegen;
 
 /* Emit the full C source for `program`. Returns a malloc'd string on success
- * (caller frees) or NULL with err populated on failure. */
+ * (caller frees) or NULL with err populated on failure.
+ *
+ * `c_imports` may be NULL when there are no C-header imports. */
 char *codegen_generate(AstNode *program, const char *source, size_t source_len,
-                       const char *filename, Arena *arena, CodegenError *out_err);
+                       const char *filename, Arena *arena, CodegenError *out_err,
+                       const CImportList *c_imports);
 
 #endif /* QSC_CODEGEN_H */
