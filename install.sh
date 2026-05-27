@@ -7,12 +7,26 @@
 # Environment:
 #   QSC_REPO     GitHub "owner/repo" (default: Bilal1545/Quickscript)
 #   QSC_VERSION  Release tag, or "latest" (default: latest)
-#   QSC_PREFIX   Install prefix (default: $HOME/.local)
+#   QSC_PREFIX   Install prefix (default: /usr/local)
 set -eu
 
 REPO="${QSC_REPO:-Bilal1545/Quickscript}"
 TAG="${QSC_VERSION:-latest}"
-PREFIX="${QSC_PREFIX:-$HOME/.local}"
+PREFIX="${QSC_PREFIX:-/usr/local}"
+
+# Use sudo when the install prefix is not writable by the current user.
+if [ -w "$PREFIX" ] || { [ ! -e "$PREFIX" ] && [ -w "$(dirname "$PREFIX")" ]; }; then
+    SUDO=""
+else
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+        echo "qsc: '$PREFIX' requires elevated privileges; using sudo"
+    else
+        echo "qsc: '$PREFIX' is not writable and 'sudo' is unavailable" >&2
+        echo "qsc: re-run with QSC_PREFIX=\$HOME/.local to install without sudo" >&2
+        exit 1
+    fi
+fi
 
 # --- detect platform ---
 os=$(uname -s)
@@ -53,24 +67,26 @@ tar -xzf "$tmp/qsc.tar.gz" -C "$tmp"
 
 bin_dir="$PREFIX/bin"
 share_dir="$PREFIX/share/qsc"
-mkdir -p "$bin_dir" "$share_dir"
+$SUDO mkdir -p "$bin_dir" "$share_dir"
 
-mv -f "$tmp/$asset"   "$share_dir/qsc-bin"
-mv -f "$tmp/runtime.c" "$share_dir/runtime.c"
-mv -f "$tmp/runtime.h" "$share_dir/runtime.h"
-chmod +x "$share_dir/qsc-bin"
+$SUDO mv -f "$tmp/$asset"   "$share_dir/qsc-bin"
+$SUDO mv -f "$tmp/runtime.c" "$share_dir/runtime.c"
+$SUDO mv -f "$tmp/runtime.h" "$share_dir/runtime.h"
+$SUDO chmod +x "$share_dir/qsc-bin"
 
 # On macOS, strip Gatekeeper quarantine flag from the downloaded binary.
 if [ "$plat_os" = "macos" ]; then
-    xattr -d com.apple.quarantine "$share_dir/qsc-bin" 2>/dev/null || true
+    $SUDO xattr -d com.apple.quarantine "$share_dir/qsc-bin" 2>/dev/null || true
 fi
 
 # Wrapper: ensure QSC_RUNTIME_DIR points at the installed runtime.
-cat > "$bin_dir/qsc" <<EOF
+wrapper="$tmp/qsc-wrapper"
+cat > "$wrapper" <<EOF
 #!/bin/sh
 exec env QSC_RUNTIME_DIR="\${QSC_RUNTIME_DIR:-$share_dir}" "$share_dir/qsc-bin" "\$@"
 EOF
-chmod +x "$bin_dir/qsc"
+chmod +x "$wrapper"
+$SUDO mv -f "$wrapper" "$bin_dir/qsc"
 
 echo "qsc: installed → $bin_dir/qsc"
 
