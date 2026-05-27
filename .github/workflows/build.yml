@@ -27,14 +27,16 @@ jobs:
             shell: bash
 
           - name: macos-x86_64
-            os: macos-13
+            os: macos-14
             artifact: qsc-macos-x86_64
             shell: bash
+            arch_flag: -arch x86_64
 
           - name: macos-aarch64
             os: macos-14
             artifact: qsc-macos-aarch64
             shell: bash
+            arch_flag: -arch arm64
 
           - name: windows-x86_64
             os: windows-latest
@@ -60,9 +62,15 @@ jobs:
 
       - name: Build
         working-directory: src
-        run: make -j2
+        run: |
+          if [ -n "${{ matrix.arch_flag }}" ]; then
+            make -j2 CC="clang ${{ matrix.arch_flag }}" LDFLAGS="${{ matrix.arch_flag }}"
+          else
+            make -j2
+          fi
 
       - name: Smoke test
+        if: matrix.name != 'macos-x86_64'
         working-directory: src
         run: ./qsc --help || ./qsc --self-test || true
 
