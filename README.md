@@ -33,6 +33,11 @@ iwr -useb https://raw.githubusercontent.com/Bilal1545/quickscript/main/install.p
 
 That's it — run `qsc --help` to get started. Prebuilt binaries for all three platforms are also available on the [Releases page](https://github.com/Bilal1545/quickscript/releases/latest) if you'd rather download by hand.
 
+The Windows installer bundles a portable Tiny C Compiler (TCC), so no separate
+gcc / MSYS2 setup is needed. On Linux and macOS, `gcc` (or any compatible
+`cc`) must already be on your `PATH` — set `QSC_CC` to override the choice
+(e.g. `QSC_CC=clang qsc file.qs`).
+
 ## Quick start
 
 ```sh
@@ -173,6 +178,7 @@ qsc --self-test             run internal foundation tests
 Environment variables:
 
 - `QSC_RUNTIME_DIR` — overrides where `runtime.c` is looked up (default: path baked in at build time).
+- `QSC_CC` — overrides the C compiler used for the final link step. By default qsc picks the bundled `tcc.exe` next to `runtime.c` if present (Windows installer ships one), otherwise falls back to `gcc`.
 
 ## Advanced: build from source
 

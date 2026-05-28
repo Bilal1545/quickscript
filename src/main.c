@@ -123,26 +123,62 @@ static char *compile_to_c(const char *input_path, char **out_source, size_t *out
     return c_src;
 }
 
-/* ---- gcc invocation -------------------------------------------------- */
+/* ---- C compiler invocation ------------------------------------------- */
 
-static int run_gcc(const char *c_path, const char *out_path, const LinkList *extra_libs) {
+/* Compiler selection precedence:
+ *   1. $QSC_CC override
+ *   2. bundled tcc.exe / tcc next to runtime.c (Windows installer ships this)
+ *   3. system gcc
+ */
+static const char *pick_cc(void) {
+    const char *env = getenv("QSC_CC");
+    if (env && env[0]) return env;
+
+    static char buf[1024];
+    const char *dir = runtime_dir();
+    snprintf(buf, sizeof buf, "%s/tcc.exe", dir);
+    if (access(buf, F_OK) == 0) return buf;
+    snprintf(buf, sizeof buf, "%s/tcc", dir);
+    if (access(buf, F_OK) == 0) return buf;
+    return "gcc";
+}
+
+static int cc_is_tcc(const char *cc) {
+    const char *base = strrchr(cc, '/');
+    base = base ? base + 1 : cc;
+    const char *back = strrchr(base, '\\');
+    if (back) base = back + 1;
+    return strncmp(base, "tcc", 3) == 0;
+}
+
+/* Windows TCC has no separate libm — math is in the bundled runtime.
+ * Detect by .exe suffix; Linux/macOS tcc still wants -lm. */
+static int cc_skip_libm(const char *cc) {
+    if (!cc_is_tcc(cc)) return 0;
+    size_t n = strlen(cc);
+    return n >= 4 && strcmp(cc + n - 4, ".exe") == 0;
+}
+
+static int run_cc(const char *c_path, const char *out_path, const LinkList *extra_libs) {
+    const char *cc = pick_cc();
+    int skip_libm = cc_skip_libm(cc);
     const char *rt = runtime_c_path();
     char include_flag[1024];
     snprintf(include_flag, sizeof include_flag, "-I%s", runtime_dir());
 
     /* Build argv dynamically so we can append `-l<name>` for each extra lib. */
     size_t extras = extra_libs ? extra_libs->len : 0;
-    size_t fixed = 8;  /* gcc, -o, out, -I..., c_path, rt, -lm, -w */
+    size_t fixed = skip_libm ? 7 : 8;  /* cc, -o, out, -I..., c_path, rt, [-lm,] -w */
     char **argv = (char **)calloc(fixed + extras + 1, sizeof(char *));
     if (!argv) { fprintf(stderr, "qsc: oom\n"); return 1; }
     size_t k = 0;
-    argv[k++] = "gcc";
+    argv[k++] = (char *)cc;
     argv[k++] = "-o";
     argv[k++] = (char *)out_path;
     argv[k++] = include_flag;
     argv[k++] = (char *)c_path;
     argv[k++] = (char *)rt;
-    argv[k++] = "-lm";
+    if (!skip_libm) argv[k++] = "-lm";
     argv[k++] = "-w";
     for (size_t i = 0; i < extras; ++i) {
         const char *name = extra_libs->items[i];
@@ -158,8 +194,8 @@ static int run_gcc(const char *c_path, const char *out_path, const LinkList *ext
     pid_t pid = fork();
     if (pid < 0) { fprintf(stderr, "qsc: fork failed: %s\n", strerror(errno)); free(argv); return 1; }
     if (pid == 0) {
-        execvp("gcc", argv);
-        fprintf(stderr, "qsc: cannot exec gcc: %s\n", strerror(errno));
+        execvp(cc, argv);
+        fprintf(stderr, "qsc: cannot exec %s: %s\n", cc, strerror(errno));
         _exit(127);
     }
     int status = 0;
@@ -167,7 +203,7 @@ static int run_gcc(const char *c_path, const char *out_path, const LinkList *ext
     /* Leak the -l<name> strings — process is about to exit anyway. */
     free(argv);
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 0;
-    QscError e = {.type = QSC_ERR_BUILD, .message = "gcc invocation failed", .file = NULL};
+    QscError e = {.type = QSC_ERR_BUILD, .message = "C compiler invocation failed", .file = NULL};
     fputs(C_RED, stderr);
     qsc_error_print(&e, NULL, 0);
     fputs(C_RESET, stderr);
@@ -251,7 +287,7 @@ static int mode_build(const char *input, const char *output, bool then_run,
         output = default_name;
     }
     const char *out = output;
-    int rc = run_gcc(tmpl, out, &libs);
+    int rc = run_cc(tmpl, out, &libs);
     link_list_free(&libs);
     unlink(tmpl);
     if (rc != 0) return rc;
