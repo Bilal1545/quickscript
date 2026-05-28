@@ -40,11 +40,11 @@
 #define MAX_CHAR_CLASS_LEN      40    /* Max length of character-class buffer in.   */
 
 
-enum { UNUSED, DOT, BEGIN, END, QUESTIONMARK, STAR, PLUS, CHAR, CHAR_CLASS, INV_CHAR_CLASS, DIGIT, NOT_DIGIT, ALPHA, NOT_ALPHA, WHITESPACE, NOT_WHITESPACE, /* BRANCH */ };
+enum { TRE_UNUSED, TRE_DOT, TRE_BEGIN, TRE_END, TRE_QUESTIONMARK, TRE_STAR, TRE_PLUS, TRE_CHAR, TRE_CHAR_CLASS, TRE_INV_CHAR_CLASS, TRE_DIGIT, TRE_NOT_DIGIT, TRE_ALPHA, TRE_NOT_ALPHA, TRE_WHITESPACE, TRE_NOT_WHITESPACE, /* BRANCH */ };
 
 typedef struct tre_node
 {
-  unsigned char  type;   /* CHAR, STAR, etc.                      */
+  unsigned char  type;   /* TRE_CHAR, TRE_STAR, etc.                      */
   union
   {
     unsigned char  ch;   /*      the character itself             */
@@ -89,7 +89,7 @@ int re_matchp(re_t pattern, const char* text, int* matchlength)
   *matchlength = 0;
   if (pattern != 0)
   {
-    if (pattern[0].type == BEGIN)
+    if (pattern[0].type == TRE_BEGIN)
     {
       return ((matchpattern(&pattern[1], text, matchlength)) ? 0 : -1);
     }
@@ -148,12 +148,12 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
     switch (c)
     {
       /* Meta-characters: */
-      case '^': {    re_compiled[j].type = BEGIN;           } break;
-      case '$': {    re_compiled[j].type = END;             } break;
-      case '.': {    re_compiled[j].type = DOT;             } break;
-      case '*': {    re_compiled[j].type = STAR;            } break;
-      case '+': {    re_compiled[j].type = PLUS;            } break;
-      case '?': {    re_compiled[j].type = QUESTIONMARK;    } break;
+      case '^': {    re_compiled[j].type = TRE_BEGIN;           } break;
+      case '$': {    re_compiled[j].type = TRE_END;             } break;
+      case '.': {    re_compiled[j].type = TRE_DOT;             } break;
+      case '*': {    re_compiled[j].type = TRE_STAR;            } break;
+      case '+': {    re_compiled[j].type = TRE_PLUS;            } break;
+      case '?': {    re_compiled[j].type = TRE_QUESTIONMARK;    } break;
 /*    case '|': {    re_compiled[j].type = BRANCH;          } break; <-- not working properly */
 
       /* Escaped character-classes (\s \w ...): */
@@ -167,17 +167,17 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
           switch (pattern[i])
           {
             /* Meta-character: */
-            case 'd': {    re_compiled[j].type = DIGIT;            } break;
-            case 'D': {    re_compiled[j].type = NOT_DIGIT;        } break;
-            case 'w': {    re_compiled[j].type = ALPHA;            } break;
-            case 'W': {    re_compiled[j].type = NOT_ALPHA;        } break;
-            case 's': {    re_compiled[j].type = WHITESPACE;       } break;
-            case 'S': {    re_compiled[j].type = NOT_WHITESPACE;   } break;
+            case 'd': {    re_compiled[j].type = TRE_DIGIT;            } break;
+            case 'D': {    re_compiled[j].type = TRE_NOT_DIGIT;        } break;
+            case 'w': {    re_compiled[j].type = TRE_ALPHA;            } break;
+            case 'W': {    re_compiled[j].type = TRE_NOT_ALPHA;        } break;
+            case 's': {    re_compiled[j].type = TRE_WHITESPACE;       } break;
+            case 'S': {    re_compiled[j].type = TRE_NOT_WHITESPACE;   } break;
 
             /* Escaped character, e.g. '.' or '$' */
             default:
             {
-              re_compiled[j].type = CHAR;
+              re_compiled[j].type = TRE_CHAR;
               re_compiled[j].u.ch = pattern[i];
             } break;
           }
@@ -186,7 +186,7 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
 /*
         else
         {
-          re_compiled[j].type = CHAR;
+          re_compiled[j].type = TRE_CHAR;
           re_compiled[j].ch = pattern[i];
         }
 */
@@ -201,7 +201,7 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
         /* Look-ahead to determine if negated */
         if (pattern[i+1] == '^')
         {
-          re_compiled[j].type = INV_CHAR_CLASS;
+          re_compiled[j].type = TRE_INV_CHAR_CLASS;
           i += 1; /* Increment i to avoid including '^' in the char-buffer */
           if (pattern[i+1] == 0) /* incomplete pattern, missing non-zero char after '^' */
           {
@@ -210,7 +210,7 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
         }
         else
         {
-          re_compiled[j].type = CHAR_CLASS;
+          re_compiled[j].type = TRE_CHAR_CLASS;
         }
 
         /* Copy characters inside [..] to buffer */
@@ -251,7 +251,7 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
       /* Other characters: */
       default:
       {
-        re_compiled[j].type = CHAR;
+        re_compiled[j].type = TRE_CHAR;
         re_compiled[j].u.ch = c;
       } break;
     }
@@ -264,28 +264,28 @@ static re_t re_compile_into(re_handle* h, const char* pattern)
     i += 1;
     j += 1;
   }
-  /* 'UNUSED' is a sentinel used to indicate end-of-pattern */
-  re_compiled[j].type = UNUSED;
+  /* 'TRE_UNUSED' is a sentinel used to indicate end-of-pattern */
+  re_compiled[j].type = TRE_UNUSED;
 
   return (re_t) re_compiled;
 }
 
 void re_print(tre_node* pattern)
 {
-  const char* types[] = { "UNUSED", "DOT", "BEGIN", "END", "QUESTIONMARK", "STAR", "PLUS", "CHAR", "CHAR_CLASS", "INV_CHAR_CLASS", "DIGIT", "NOT_DIGIT", "ALPHA", "NOT_ALPHA", "WHITESPACE", "NOT_WHITESPACE", "BRANCH" };
+  const char* types[] = { "TRE_UNUSED", "TRE_DOT", "TRE_BEGIN", "TRE_END", "TRE_QUESTIONMARK", "TRE_STAR", "TRE_PLUS", "TRE_CHAR", "TRE_CHAR_CLASS", "TRE_INV_CHAR_CLASS", "TRE_DIGIT", "TRE_NOT_DIGIT", "TRE_ALPHA", "TRE_NOT_ALPHA", "TRE_WHITESPACE", "TRE_NOT_WHITESPACE", "BRANCH" };
 
   int i;
   int j;
   char c;
   for (i = 0; i < MAX_REGEXP_OBJECTS; ++i)
   {
-    if (pattern[i].type == UNUSED)
+    if (pattern[i].type == TRE_UNUSED)
     {
       break;
     }
 
     printf("type: %s", types[pattern[i].type]);
-    if (pattern[i].type == CHAR_CLASS || pattern[i].type == INV_CHAR_CLASS)
+    if (pattern[i].type == TRE_CHAR_CLASS || pattern[i].type == TRE_INV_CHAR_CLASS)
     {
       printf(" [");
       for (j = 0; j < MAX_CHAR_CLASS_LEN; ++j)
@@ -299,7 +299,7 @@ void re_print(tre_node* pattern)
       }
       printf("]");
     }
-    else if (pattern[i].type == CHAR)
+    else if (pattern[i].type == TRE_CHAR)
     {
       printf(" '%c'", pattern[i].u.ch);
     }
@@ -406,15 +406,15 @@ static int matchone(tre_node p, char c)
 {
   switch (p.type)
   {
-    case DOT:            return matchdot(c);
-    case CHAR_CLASS:     return  matchcharclass(c, (const char*)p.u.ccl);
-    case INV_CHAR_CLASS: return !matchcharclass(c, (const char*)p.u.ccl);
-    case DIGIT:          return  matchdigit(c);
-    case NOT_DIGIT:      return !matchdigit(c);
-    case ALPHA:          return  matchalphanum(c);
-    case NOT_ALPHA:      return !matchalphanum(c);
-    case WHITESPACE:     return  matchwhitespace(c);
-    case NOT_WHITESPACE: return !matchwhitespace(c);
+    case TRE_DOT:            return matchdot(c);
+    case TRE_CHAR_CLASS:     return  matchcharclass(c, (const char*)p.u.ccl);
+    case TRE_INV_CHAR_CLASS: return !matchcharclass(c, (const char*)p.u.ccl);
+    case TRE_DIGIT:          return  matchdigit(c);
+    case TRE_NOT_DIGIT:      return !matchdigit(c);
+    case TRE_ALPHA:          return  matchalphanum(c);
+    case TRE_NOT_ALPHA:      return !matchalphanum(c);
+    case TRE_WHITESPACE:     return  matchwhitespace(c);
+    case TRE_NOT_WHITESPACE: return !matchwhitespace(c);
     default:             return  (p.u.ch == c);
   }
 }
@@ -459,7 +459,7 @@ static int matchplus(tre_node p, tre_node* pattern, const char* text, int* match
 
 static int matchquestion(tre_node p, tre_node* pattern, const char* text, int* matchlength)
 {
-  if (p.type == UNUSED)
+  if (p.type == TRE_UNUSED)
     return 1;
   if (matchpattern(pattern, text, matchlength))
       return 1;
@@ -481,19 +481,19 @@ static int matchquestion(tre_node p, tre_node* pattern, const char* text, int* m
 static int matchpattern(tre_node* pattern, const char* text, int *matchlength)
 {
   int pre = *matchlength;
-  if ((pattern[0].type == UNUSED) || (pattern[1].type == QUESTIONMARK))
+  if ((pattern[0].type == TRE_UNUSED) || (pattern[1].type == TRE_QUESTIONMARK))
   {
     return matchquestion(pattern[1], &pattern[2], text, matchlength);
   }
-  else if (pattern[1].type == STAR)
+  else if (pattern[1].type == TRE_STAR)
   {
     return matchstar(pattern[0], &pattern[2], text, matchlength);
   }
-  else if (pattern[1].type == PLUS)
+  else if (pattern[1].type == TRE_PLUS)
   {
     return matchplus(pattern[0], &pattern[2], text, matchlength);
   }
-  else if ((pattern[0].type == END) && pattern[1].type == UNUSED)
+  else if ((pattern[0].type == TRE_END) && pattern[1].type == TRE_UNUSED)
   {
     return text[0] == '\0';
   }
@@ -517,19 +517,19 @@ static int matchpattern(tre_node* pattern, const char* text, int* matchlength)
   int pre = *matchlength;
   do
   {
-    if ((pattern[0].type == UNUSED) || (pattern[1].type == QUESTIONMARK))
+    if ((pattern[0].type == TRE_UNUSED) || (pattern[1].type == TRE_QUESTIONMARK))
     {
       return matchquestion(pattern[0], &pattern[2], text, matchlength);
     }
-    else if (pattern[1].type == STAR)
+    else if (pattern[1].type == TRE_STAR)
     {
       return matchstar(pattern[0], &pattern[2], text, matchlength);
     }
-    else if (pattern[1].type == PLUS)
+    else if (pattern[1].type == TRE_PLUS)
     {
       return matchplus(pattern[0], &pattern[2], text, matchlength);
     }
-    else if ((pattern[0].type == END) && pattern[1].type == UNUSED)
+    else if ((pattern[0].type == TRE_END) && pattern[1].type == TRE_UNUSED)
     {
       return (text[0] == '\0');
     }
