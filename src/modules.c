@@ -6,6 +6,13 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifdef _WIN32
+#include <stdlib.h>  /* _fullpath */
+#else
+#include <limits.h>
+#include <stdlib.h>  /* realpath */
+#endif
+
 #include "map.h"
 
 /* ------- module info --------------------------------------------------- */
@@ -256,11 +263,22 @@ static bool has_extension(const char *path) {
 }
 
 static char *canonicalize(Arena *a, const char *path) {
+#ifdef _WIN32
+    char *resolved = _fullpath(NULL, path, 0);
+    if (!resolved) return NULL;
+    for (char *p = resolved; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+    char *out = arena_strdup(a, resolved);
+    free(resolved);
+    return out;
+#else
     char *resolved = realpath(path, NULL);
     if (!resolved) return NULL;
     char *out = arena_strdup(a, resolved);
     free(resolved);
     return out;
+#endif
 }
 
 /* Try `base`, then `base.qs`, then `base.js`. Returns canonical path or NULL. */
