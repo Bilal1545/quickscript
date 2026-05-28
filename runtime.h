@@ -12,7 +12,29 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stddef.h>
+#ifdef _WIN32
+/* Windows has no POSIX <regex.h>. Provide a minimal shim backed by
+ * tiny-regex-c (vendor/re.h). Limitations: no capture groups beyond
+ * match[0]; REG_NEWLINE / REG_NOTBOL are accepted but ignored. */
+#include "vendor/re.h"
+#define REG_EXTENDED 1
+#define REG_ICASE    2
+#define REG_NEWLINE  4
+#define REG_NOTBOL   8
+typedef ptrdiff_t regoff_t;
+typedef struct { regoff_t rm_so, rm_eo; } regmatch_t;
+typedef struct {
+    re_t  compiled;
+    int   icase;
+    char *icase_pattern;
+} regex_t;
+int  regcomp(regex_t *r, const char *pattern, int flags);
+int  regexec(const regex_t *r, const char *text, size_t nmatch, regmatch_t *pmatch, int eflags);
+void regfree(regex_t *r);
+#else
 #include <regex.h>
+#endif
 #include <time.h>
 
 // ==========================================

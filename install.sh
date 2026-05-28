@@ -72,6 +72,9 @@ $SUDO mkdir -p "$bin_dir" "$share_dir"
 $SUDO mv -f "$tmp/$asset"   "$share_dir/qsc-bin"
 $SUDO mv -f "$tmp/runtime.c" "$share_dir/runtime.c"
 $SUDO mv -f "$tmp/runtime.h" "$share_dir/runtime.h"
+$SUDO mkdir -p "$share_dir/vendor"
+$SUDO mv -f "$tmp/vendor/re.h" "$share_dir/vendor/re.h"
+$SUDO mv -f "$tmp/vendor/re.c" "$share_dir/vendor/re.c"
 $SUDO chmod +x "$share_dir/qsc-bin"
 
 # On macOS, strip Gatekeeper quarantine flag from the downloaded binary.

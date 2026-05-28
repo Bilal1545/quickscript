@@ -44,6 +44,9 @@ try {
     Move-Item -Force (Join-Path $Tmp "$Asset.exe")     (Join-Path $Prefix "qsc.exe")
     Move-Item -Force (Join-Path $Tmp "runtime.c")      (Join-Path $Prefix "runtime.c")
     Move-Item -Force (Join-Path $Tmp "runtime.h")      (Join-Path $Prefix "runtime.h")
+    New-Item -ItemType Directory -Force -Path (Join-Path $Prefix "vendor") | Out-Null
+    Move-Item -Force (Join-Path $Tmp "vendor\re.h")    (Join-Path $Prefix "vendor\re.h")
+    Move-Item -Force (Join-Path $Tmp "vendor\re.c")    (Join-Path $Prefix "vendor\re.c")
 
     # Older installs may have a leftover msys-2.0.dll from the MSYS-built binary;
     # remove it so the new native MINGW build isn't confused by stale runtimes.

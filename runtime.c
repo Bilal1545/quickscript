@@ -2110,3 +2110,59 @@ void js_runtime_init(void) {
     js_RangeError_global   = js_function(js_RangeError_construct);
     js_SyntaxError_global  = js_function(js_SyntaxError_construct);
 }
+
+#ifdef _WIN32
+/* POSIX regex shim backed by tiny-regex-c. Unity-included so the user only
+ * compiles runtime.c (no separate vendor/re.c on the command line). */
+#include "vendor/re.c"
+
+static void qsc_strlower(char *s) {
+    for (; *s; s++) *s = (char)tolower((unsigned char)*s);
+}
+
+int regcomp(regex_t *r, const char *pattern, int flags) {
+    r->icase = (flags & REG_ICASE) ? 1 : 0;
+    r->icase_pattern = NULL;
+    const char *pat = pattern;
+    if (r->icase) {
+        r->icase_pattern = strdup(pattern);
+        if (!r->icase_pattern) { r->compiled = NULL; return 1; }
+        qsc_strlower(r->icase_pattern);
+        pat = r->icase_pattern;
+    }
+    r->compiled = re_compile(pat);
+    return r->compiled ? 0 : 1;
+}
+
+int regexec(const regex_t *r, const char *text, size_t nmatch, regmatch_t *pmatch, int eflags) {
+    (void)eflags;
+    for (size_t i = 0; i < nmatch; i++) {
+        pmatch[i].rm_so = -1;
+        pmatch[i].rm_eo = -1;
+    }
+    if (!r->compiled) return 1;
+    char *lowered = NULL;
+    const char *t = text;
+    if (r->icase) {
+        lowered = strdup(text);
+        if (!lowered) return 1;
+        qsc_strlower(lowered);
+        t = lowered;
+    }
+    int matchlen = 0;
+    int idx = re_matchp(r->compiled, t, &matchlen);
+    free(lowered);
+    if (idx < 0) return 1;
+    if (nmatch > 0) {
+        pmatch[0].rm_so = idx;
+        pmatch[0].rm_eo = idx + matchlen;
+    }
+    return 0;
+}
+
+void regfree(regex_t *r) {
+    if (r->compiled) { re_free(r->compiled); r->compiled = NULL; }
+    free(r->icase_pattern);
+    r->icase_pattern = NULL;
+}
+#endif /* _WIN32 */

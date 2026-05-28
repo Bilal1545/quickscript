@@ -91,6 +91,8 @@ jobs:
             cp qsc ../dist/${{ matrix.artifact }}
           fi
           cp ../runtime.c ../runtime.h ../dist/
+          mkdir -p ../dist/vendor
+          cp ../vendor/re.h ../vendor/re.c ../dist/vendor/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
