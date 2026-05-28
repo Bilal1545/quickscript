@@ -41,9 +41,20 @@ int qsc_clock_gettime(int clk, struct timespec *ts);
 #define clock_gettime qsc_clock_gettime
 #endif
 #define timegm      _mkgmtime
-#define gmtime_r(t, tmp)    (gmtime_s((tmp), (t)) == 0 ? (tmp) : NULL)
-#define localtime_r(t, tmp) (localtime_s((tmp), (t)) == 0 ? (tmp) : NULL)
+/* TCC's bundled libc lacks gmtime_s/localtime_s; the underlying CRT
+ * gmtime/localtime are non-reentrant but fine for our single-threaded
+ * generated programs. Copy into the caller's buffer for API parity. */
+#define gmtime_r(t, tmp)    (memcpy((tmp), gmtime(t),    sizeof(struct tm)), (tmp))
+#define localtime_r(t, tmp) (memcpy((tmp), localtime(t), sizeof(struct tm)), (tmp))
 char *strptime(const char *buf, const char *fmt, struct tm *tm);
+
+#ifdef __TINYC__
+/* TCC's libtcc1 omits some C99 math helpers — provide them. */
+static inline double qsc_cbrt(double x) { return x < 0 ? -pow(-x, 1.0/3.0) : pow(x, 1.0/3.0); }
+static inline double qsc_log2(double x) { return log(x) * 1.4426950408889634; }
+#define cbrt qsc_cbrt
+#define log2 qsc_log2
+#endif
 #else
 #include <regex.h>
 #endif
