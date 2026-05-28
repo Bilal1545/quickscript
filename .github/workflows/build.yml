@@ -44,6 +44,7 @@ jobs:
             os: windows-latest
             artifact: qsc-windows-x86_64
             shell: 'msys2 {0}'
+            msystem: MINGW64
 
     defaults:
       run:
@@ -56,10 +57,10 @@ jobs:
         if: matrix.name == 'windows-x86_64'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MSYS
+          msystem: MINGW64
           update: true
           install: >-
-            gcc
+            mingw-w64-x86_64-gcc
             make
 
       - name: Build
@@ -67,6 +68,9 @@ jobs:
         run: |
           if [ -n "${{ matrix.arch_flag }}" ]; then
             make -j2 CC="clang ${{ matrix.arch_flag }}" LDFLAGS="${{ matrix.arch_flag }}"
+          elif [ "${{ matrix.name }}" = "windows-x86_64" ]; then
+            # Statically link libgcc / libwinpthread so the binary has no runtime DLL deps.
+            make -j2 LDFLAGS="-static -static-libgcc"
           else
             make -j2
           fi
@@ -82,8 +86,7 @@ jobs:
           mkdir -p ../dist
           if [ "${{ matrix.name }}" = "windows-x86_64" ]; then
             cp qsc.exe ../dist/${{ matrix.artifact }}.exe
-            # Bundle MSYS runtime DLL (qsc uses fork/exec -> needs POSIX layer)
-            cp /usr/bin/msys-2.0.dll ../dist/ 2>/dev/null || true
+            # MINGW64 build is statically linked against the C runtime — no DLLs to ship.
           else
             cp qsc ../dist/${{ matrix.artifact }}
           fi

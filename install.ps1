@@ -42,9 +42,12 @@ try {
     New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 
     Move-Item -Force (Join-Path $Tmp "$Asset.exe")     (Join-Path $Prefix "qsc.exe")
-    Move-Item -Force (Join-Path $Tmp "msys-2.0.dll")   (Join-Path $Prefix "msys-2.0.dll") -ErrorAction SilentlyContinue
     Move-Item -Force (Join-Path $Tmp "runtime.c")      (Join-Path $Prefix "runtime.c")
     Move-Item -Force (Join-Path $Tmp "runtime.h")      (Join-Path $Prefix "runtime.h")
+
+    # Older installs may have a leftover msys-2.0.dll from the MSYS-built binary;
+    # remove it so the new native MINGW build isn't confused by stale runtimes.
+    Remove-Item -Force (Join-Path $Prefix "msys-2.0.dll") -ErrorAction SilentlyContinue
 
     if (-not $SkipTcc) {
         Write-Host "qsc: downloading bundled C compiler (TCC) from $TccUrl"

@@ -16,8 +16,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <time.h>
+
+#ifdef _WIN32
+  #include <io.h>          /* _access, _isatty, _fileno */
+  #include <process.h>     /* _spawnvp, _getpid, _P_WAIT */
+  #ifndef F_OK
+  #define F_OK 0
+  #endif
+  #define access  _access
+  #define getpid  _getpid
+  #define isatty  _isatty
+  #define fileno  _fileno
+  #define PATH_SEP '\\'
+#else
+  #include <sys/wait.h>
+  #include <unistd.h>
+  #define PATH_SEP '/'
+#endif
 
 #include "arena.h"
 #include "ast.h"
@@ -32,6 +48,56 @@
 #ifndef QSC_RUNTIME_DIR
 #define QSC_RUNTIME_DIR "."
 #endif
+
+/* ---- portable subprocess + temp file helpers ------------------------- */
+
+/* Wait-for-completion subprocess. Returns child exit status, or -1 on failure
+ * to spawn / abnormal exit. Diagnostic message printed on failure. */
+static int run_subprocess(const char *prog, char *const argv[]) {
+#ifdef _WIN32
+    intptr_t rc = _spawnvp(_P_WAIT, prog, (const char *const *)argv);
+    if (rc == -1) {
+        fprintf(stderr, "qsc: cannot exec %s: %s\n", prog, strerror(errno));
+        return -1;
+    }
+    return (int)rc;
+#else
+    pid_t pid = fork();
+    if (pid < 0) { fprintf(stderr, "qsc: fork failed: %s\n", strerror(errno)); return -1; }
+    if (pid == 0) {
+        execvp(prog, argv);
+        fprintf(stderr, "qsc: cannot exec %s: %s\n", prog, strerror(errno));
+        _exit(127);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+}
+
+/* Create a temp .c file. Writes path to out_path and opens it for writing.
+ * Returns NULL on failure. Caller fclose()s and unlink()s. */
+static FILE *open_temp_c(char *out_path, size_t out_size) {
+    const char *tmpdir;
+#ifdef _WIN32
+    tmpdir = getenv("TEMP");
+    if (!tmpdir || !*tmpdir) tmpdir = getenv("TMP");
+    if (!tmpdir || !*tmpdir) tmpdir = ".";
+#else
+    tmpdir = getenv("TMPDIR");
+    if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+#endif
+    static unsigned counter = 0;
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        unsigned u = ((unsigned)time(NULL) ^ ((unsigned)getpid() << 8)) + counter++;
+        snprintf(out_path, out_size, "%s%cqsc-%u-%d.c", tmpdir, PATH_SEP, u, attempt);
+        /* Open with exclusive create where the C library supports it; fall back to
+         * plain "wb" otherwise (race window is small and qsc is single-user). */
+        FILE *f = fopen(out_path, "wb");
+        if (f) return f;
+    }
+    return NULL;
+}
 
 /* ANSI colors — disabled when stderr is not a TTY. */
 static const char *C_RED = "", *C_GREEN = "", *C_RESET = "";
@@ -191,18 +257,10 @@ static int run_cc(const char *c_path, const char *out_path, const LinkList *extr
     }
     argv[k] = NULL;
 
-    pid_t pid = fork();
-    if (pid < 0) { fprintf(stderr, "qsc: fork failed: %s\n", strerror(errno)); free(argv); return 1; }
-    if (pid == 0) {
-        execvp(cc, argv);
-        fprintf(stderr, "qsc: cannot exec %s: %s\n", cc, strerror(errno));
-        _exit(127);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
+    int rc = run_subprocess(cc, argv);
     /* Leak the -l<name> strings — process is about to exit anyway. */
     free(argv);
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 0;
+    if (rc == 0) return 0;
     QscError e = {.type = QSC_ERR_BUILD, .message = "C compiler invocation failed", .file = NULL};
     fputs(C_RED, stderr);
     qsc_error_print(&e, NULL, 0);
@@ -211,16 +269,9 @@ static int run_cc(const char *c_path, const char *out_path, const LinkList *extr
 }
 
 static int run_binary(const char *path) {
-    pid_t pid = fork();
-    if (pid < 0) return 1;
-    if (pid == 0) {
-        execl(path, path, (char *)NULL);
-        fprintf(stderr, "qsc: cannot exec %s: %s\n", path, strerror(errno));
-        _exit(127);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    char *argv[2] = { (char *)path, NULL };
+    int rc = run_subprocess(path, argv);
+    return rc < 0 ? 1 : rc;
 }
 
 /* ---- modes ----------------------------------------------------------- */
@@ -254,6 +305,10 @@ static int mode_emit_c(const char *input, const char *output) {
 static void default_output_name(const char *input, char *out, size_t out_size) {
     const char *base = strrchr(input, '/');
     base = base ? base + 1 : input;
+#ifdef _WIN32
+    const char *back = strrchr(base, '\\');
+    if (back) base = back + 1;
+#endif
     const char *dot = strrchr(base, '.');
     size_t n = dot ? (size_t)(dot - base) : strlen(base);
     if (n == 0 || !dot) { snprintf(out, out_size, "a"); return; }
@@ -274,11 +329,11 @@ static int mode_build(const char *input, const char *output, bool then_run,
     free(src);
     if (!c) { link_list_free(&libs); return 1; }
 
-    char tmpl[] = "/tmp/qsc-XXXXXX.c";
-    int fd = mkstemps(tmpl, 2);
-    if (fd < 0) { fprintf(stderr, "qsc: mkstemps failed: %s\n", strerror(errno)); free(c); link_list_free(&libs); return 1; }
-    write(fd, c, strlen(c));
-    close(fd);
+    char tmpl[1024];
+    FILE *tf = open_temp_c(tmpl, sizeof tmpl);
+    if (!tf) { fprintf(stderr, "qsc: cannot create temp file: %s\n", strerror(errno)); free(c); link_list_free(&libs); return 1; }
+    fputs(c, tf);
+    fclose(tf);
     free(c);
 
     char default_name[1024];
@@ -289,7 +344,7 @@ static int mode_build(const char *input, const char *output, bool then_run,
     const char *out = output;
     int rc = run_cc(tmpl, out, &libs);
     link_list_free(&libs);
-    unlink(tmpl);
+    remove(tmpl);
     if (rc != 0) return rc;
 
     /* Display path: prepend "./" only when the user gave a bare filename
