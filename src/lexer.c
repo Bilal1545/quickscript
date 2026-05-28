@@ -175,6 +175,57 @@ static bool lex_ident(Lexer *l, Token *t) {
     return true;
 }
 
+/* ------- raw C block --------------------------------------------------- *
+ * Called after the lexer has matched the `__c` identifier and consumed the
+ * opening `{{{`. Slurps source bytes verbatim until the matching `}}}`,
+ * skipping over C string/char literals and C comments so embedded braces
+ * don't terminate the block prematurely.
+ */
+static bool lex_c_block(Lexer *l, Token *t, uint32_t tok_start) {
+    size_t body_start = l->pos;
+    while (!at_eof(l)) {
+        int c = peek(l);
+        if (c == '}' && peek_n(l, 1) == '}' && peek_n(l, 2) == '}') {
+            size_t body_end = l->pos;
+            advance(l); advance(l); advance(l); /* consume }}} */
+
+            size_t n = body_end - body_start;
+            char *buf = (char *)arena_alloc(l->arena, n + 1);
+            memcpy(buf, l->src + body_start, n);
+            buf[n] = '\0';
+
+            t->kind = TK_C_BLOCK;
+            t->start = tok_start;
+            t->end = (uint32_t)l->pos;
+            t->str_val = buf;
+            t->str_len = (uint32_t)n;
+            return true;
+        }
+        if (c == '"' || c == '\'') {
+            int q = c;
+            advance(l);
+            while (!at_eof(l) && peek(l) != q) {
+                if (peek(l) == '\\') { advance(l); if (!at_eof(l)) advance(l); }
+                else advance(l);
+            }
+            if (!at_eof(l)) advance(l);
+            continue;
+        }
+        if (c == '/' && peek_n(l, 1) == '/') {
+            while (!at_eof(l) && peek(l) != '\n') advance(l);
+            continue;
+        }
+        if (c == '/' && peek_n(l, 1) == '*') {
+            advance(l); advance(l);
+            while (!at_eof(l) && !(peek(l) == '*' && peek_n(l, 1) == '/')) advance(l);
+            if (!at_eof(l)) { advance(l); advance(l); }
+            continue;
+        }
+        advance(l);
+    }
+    return lex_error(l, "unterminated __c block (expected '}}}')");
+}
+
 /* ------- number --------------------------------------------------------- */
 
 static bool lex_number(Lexer *l, Token *t) {
@@ -538,7 +589,25 @@ bool lex_next(Lexer *l, Token *tok) {
 
     /* identifier / keyword */
     if (is_id_start(c)) {
-        return lex_ident(l, tok);
+        if (!lex_ident(l, tok)) return false;
+        /* Recognize `__c {{{ ... }}}` raw-C block. The `__c` identifier is
+         * otherwise legal in user code, so fall back to TK_IDENT if no
+         * `{{{` follows. */
+        if (tok->kind == TK_IDENT
+            && tok->end - tok->start == 3
+            && memcmp(l->src + tok->start, "__c", 3) == 0) {
+            size_t save_pos = l->pos;
+            uint32_t save_line = l->line, save_col = l->col;
+            (void)skip_ws_comments(l);
+            if (peek(l) == '{' && peek_n(l, 1) == '{' && peek_n(l, 2) == '{') {
+                advance(l); advance(l); advance(l);
+                return lex_c_block(l, tok, tok->start);
+            }
+            l->pos = save_pos;
+            l->line = save_line;
+            l->col = save_col;
+        }
+        return true;
     }
 
     /* number */
@@ -735,6 +804,7 @@ const char *tk_name(TokenKind k) {
         NAMES[TK_TEMPLATE_HEAD] = "TEMPLATE_HEAD";
         NAMES[TK_TEMPLATE_MIDDLE] = "TEMPLATE_MIDDLE";
         NAMES[TK_TEMPLATE_TAIL] = "TEMPLATE_TAIL";
+        NAMES[TK_C_BLOCK] = "C_BLOCK";
         NAMES[TK_LBRACE] = "{"; NAMES[TK_RBRACE] = "}";
         NAMES[TK_LPAREN] = "("; NAMES[TK_RPAREN] = ")";
         NAMES[TK_LBRACKET] = "["; NAMES[TK_RBRACKET] = "]";

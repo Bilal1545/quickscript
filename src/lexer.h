@@ -30,6 +30,7 @@ typedef enum {
     TK_TEMPLATE_HEAD,     /* `head${ */
     TK_TEMPLATE_MIDDLE,   /* }middle${ */
     TK_TEMPLATE_TAIL,     /* }tail`     (also used for no-substitution backtick strings) */
+    TK_C_BLOCK,           /* __c {{{ ...raw C... }}} — body in str_val */
 
     /* punctuators */
     TK_LBRACE, TK_RBRACE,

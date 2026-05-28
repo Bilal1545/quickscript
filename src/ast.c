@@ -264,6 +264,7 @@ const char *ast_kind_name(AstKind k) {
         NAMES[AST_EMPTY_STMT] = "EmptyStatement";
         NAMES[AST_LABELED_STMT] = "LabeledStatement";
         NAMES[AST_DEBUGGER_STMT] = "DebuggerStatement";
+        NAMES[AST_C_BLOCK] = "CBlock";
         NAMES[AST_LITERAL] = "Literal";
         NAMES[AST_IDENTIFIER] = "Identifier";
         NAMES[AST_THIS_EXPR] = "ThisExpression";

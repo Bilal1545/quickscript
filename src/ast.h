@@ -58,6 +58,7 @@ typedef enum {
     AST_EMPTY_STMT,
     AST_LABELED_STMT,
     AST_DEBUGGER_STMT,
+    AST_C_BLOCK,            /* raw C code emitted verbatim (`__c {{{ ... }}}`) */
 
     /* expressions */
     AST_LITERAL,
@@ -327,6 +328,9 @@ struct AstNode {
 
         /* assignment pattern: target = default */
         struct { AstNode *left; AstNode *right; } assign_pattern;
+
+        /* raw C block — code points into the source arena, NUL-terminated. */
+        struct { const char *code; uint32_t len; } c_block;
     };
 };
 

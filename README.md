@@ -174,6 +174,37 @@ The directive must be the first non-whitespace content of its comment
 intentionally ignored). Each imported module is scanned, so a library
 dependency travels with the file that needs it.
 
+## Inline C blocks
+
+When a function-by-function FFI binding feels too coarse, you can drop raw C
+straight into a QuickScript source with a `__c {{{ ... }}}` block. The body
+is emitted verbatim into the generated C, wrapped in its own scope:
+
+```js
+let n = 100
+
+__c {{{
+    int sum = 0;
+    for (int i = 0; i < (int)n->number; i++) {
+        sum += i;
+    }
+    printf("sum of 0..%d = %d\n", (int)n->number, sum);
+}}}
+
+print("done")
+```
+
+QuickScript variables in scope are visible inside the block as `JsValue *`
+locals — read `n->number`, `n->string`, etc., and assign with the usual
+`js_number(...) / js_string(...)` constructors. Names that collide with C
+keywords (`int`, `new`, `class`, …) are mangled to `_js_<name>` in the
+generated C, so reference them by that mangled form.
+
+The delimiter is `{{{` … `}}}`; embedded C string literals, char literals,
+and `//` / `/* */` comments are scanned over, so `printf("}}}\n")` inside a
+block does not end it early. For file-scope helpers (structs, typedefs,
+static functions), keep using an external `.c` file with `// @link`.
+
 ## Usage
 
 ```

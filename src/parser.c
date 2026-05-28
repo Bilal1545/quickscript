@@ -1747,6 +1747,14 @@ static AstNode *parse_statement(Parser *p) {
             n->end = t->end;
             return n;
         }
+        case TK_C_BLOCK: {
+            const Token *t = advance_tok(p);
+            AstNode *n = make_node(p, AST_C_BLOCK, t);
+            n->c_block.code = t->str_val;
+            n->c_block.len = t->str_len;
+            n->end = t->end;
+            return n;
+        }
         default: {
             /* labeled statement: IDENT ':' stmt */
             if (k == TK_IDENT && peek_at(p, 1)->kind == TK_COLON) {

@@ -1102,6 +1102,12 @@ static void gen_stmt(Codegen *c, AstNode *n, Buffer *out) {
             return;
         }
         case AST_CLASS_DECL: gen_class_decl(c, n, out); return;
+        case AST_C_BLOCK: {
+            buf_append_str(out, "/* __c block */ {\n");
+            if (n->c_block.code) buf_append(out, n->c_block.code, n->c_block.len);
+            buf_append_str(out, "\n}\n");
+            return;
+        }
         default:
             cg_error(c, n, "unsupported statement: %s", ast_kind_name(n->kind));
             return;
