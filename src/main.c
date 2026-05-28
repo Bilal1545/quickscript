@@ -298,9 +298,9 @@ static int mode_emit_c(const char *input, const char *output) {
 }
 
 /* Derive default output name from input path:
- *   /path/to/hello.qs -> hello
+ *   /path/to/hello.qs -> hello   (hello.exe on Windows)
  *   utils.js          -> utils
- *   Makefile          -> a   (no extension; avoid overwriting input)
+ *   Makefile          -> a       (no extension; avoid overwriting input)
  * Result is owned by the caller's buffer. */
 static void default_output_name(const char *input, char *out, size_t out_size) {
     const char *base = strrchr(input, '/');
@@ -311,10 +311,18 @@ static void default_output_name(const char *input, char *out, size_t out_size) {
 #endif
     const char *dot = strrchr(base, '.');
     size_t n = dot ? (size_t)(dot - base) : strlen(base);
-    if (n == 0 || !dot) { snprintf(out, out_size, "a"); return; }
+    if (n == 0 || !dot) { snprintf(out, out_size, "a"); goto suffix; }
     if (n >= out_size) n = out_size - 1;
     memcpy(out, base, n);
     out[n] = '\0';
+suffix:
+#ifdef _WIN32
+    {
+        size_t used = strlen(out);
+        if (used + 4 < out_size) memcpy(out + used, ".exe", 5);
+    }
+#endif
+    return;
 }
 
 static int mode_build(const char *input, const char *output, bool then_run,
