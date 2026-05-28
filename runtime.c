@@ -2112,6 +2112,52 @@ void js_runtime_init(void) {
 }
 
 #ifdef _WIN32
+#include <windows.h>
+
+/* clock_gettime(CLOCK_REALTIME, ...) — convert FILETIME (100-ns since 1601-01-01)
+ * to timespec (seconds + ns since 1970-01-01). */
+int qsc_clock_gettime(int clk, struct timespec *ts) {
+    (void)clk;
+    FILETIME ft;
+    ULARGE_INTEGER ui;
+    GetSystemTimeAsFileTime(&ft);
+    ui.LowPart = ft.dwLowDateTime;
+    ui.HighPart = ft.dwHighDateTime;
+    uint64_t since_1970 = ui.QuadPart - 116444736000000000ULL;
+    ts->tv_sec  = (time_t)(since_1970 / 10000000ULL);
+    ts->tv_nsec = (long)((since_1970 % 10000000ULL) * 100);
+    return 0;
+}
+
+/* Minimal strptime — only the two format strings runtime.c actually uses:
+ *   "%Y-%m-%dT%H:%M:%S" and "%Y-%m-%d". Returns NULL on mismatch. */
+#undef strptime
+static int qsc_parse_int(const char **p, int width, int *out) {
+    int v = 0, n = 0;
+    while (n < width && **p >= '0' && **p <= '9') { v = v * 10 + (*(*p)++ - '0'); n++; }
+    if (n == 0) return 0;
+    *out = v;
+    return 1;
+}
+char *strptime(const char *buf, const char *fmt, struct tm *tm) {
+    const char *b = buf;
+    for (const char *f = fmt; *f; f++) {
+        if (*f != '%') { if (*b++ != *f) return NULL; continue; }
+        f++;
+        int v;
+        switch (*f) {
+            case 'Y': if (!qsc_parse_int(&b, 4, &v)) return NULL; tm->tm_year = v - 1900; break;
+            case 'm': if (!qsc_parse_int(&b, 2, &v)) return NULL; tm->tm_mon  = v - 1;    break;
+            case 'd': if (!qsc_parse_int(&b, 2, &v)) return NULL; tm->tm_mday = v;        break;
+            case 'H': if (!qsc_parse_int(&b, 2, &v)) return NULL; tm->tm_hour = v;        break;
+            case 'M': if (!qsc_parse_int(&b, 2, &v)) return NULL; tm->tm_min  = v;        break;
+            case 'S': if (!qsc_parse_int(&b, 2, &v)) return NULL; tm->tm_sec  = v;        break;
+            default:  return NULL;
+        }
+    }
+    return (char *)b;
+}
+
 /* POSIX regex shim backed by tiny-regex-c. Unity-included so the user only
  * compiles runtime.c (no separate vendor/re.c on the command line). */
 #include "vendor/re.c"

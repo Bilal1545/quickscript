@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 #ifdef _WIN32
 /* Windows has no POSIX <regex.h>. Provide a minimal shim backed by
  * tiny-regex-c (vendor/re.h). Limitations: no capture groups beyond
@@ -32,10 +33,20 @@ typedef struct {
 int  regcomp(regex_t *r, const char *pattern, int flags);
 int  regexec(const regex_t *r, const char *text, size_t nmatch, regmatch_t *pmatch, int eflags);
 void regfree(regex_t *r);
+
+/* POSIX time API is partial on MinGW. Map missing pieces to Win32 / MSVC. */
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+int qsc_clock_gettime(int clk, struct timespec *ts);
+#define clock_gettime qsc_clock_gettime
+#endif
+#define timegm      _mkgmtime
+#define gmtime_r(t, tmp)    (gmtime_s((tmp), (t)) == 0 ? (tmp) : NULL)
+#define localtime_r(t, tmp) (localtime_s((tmp), (t)) == 0 ? (tmp) : NULL)
+char *strptime(const char *buf, const char *fmt, struct tm *tm);
 #else
 #include <regex.h>
 #endif
-#include <time.h>
 
 // ==========================================
 // TYPE SYSTEM
