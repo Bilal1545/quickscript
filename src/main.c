@@ -49,6 +49,40 @@
 #define QSC_RUNTIME_DIR "."
 #endif
 
+/* ---- cross-compile target ------------------------------------------- */
+
+typedef struct {
+    const char *name;        /* canonical CLI name */
+    const char *zig_triple;  /* passed to `zig cc -target ...` */
+    const char *gcc_prefix;  /* used to look up `<prefix>-gcc` */
+    const char *suffix;      /* output extension, e.g. ".exe" or "" */
+    bool is_windows;
+} TargetSpec;
+
+static const TargetSpec TARGETS[] = {
+    {"windows", "x86_64-windows-gnu", "x86_64-w64-mingw32", ".exe", true},
+    {"win64",   "x86_64-windows-gnu", "x86_64-w64-mingw32", ".exe", true},
+    {"win32",   "i686-windows-gnu",   "i686-w64-mingw32",   ".exe", true},
+    {"linux",   "x86_64-linux-gnu",   "x86_64-linux-gnu",   "",     false},
+    {"linux64", "x86_64-linux-gnu",   "x86_64-linux-gnu",   "",     false},
+};
+#define TARGETS_LEN (sizeof TARGETS / sizeof TARGETS[0])
+
+/* Resolves `name` into a target spec. Returns a static spec when the name is
+ * one of the friendly aliases; otherwise synthesizes one from the raw triple
+ * (e.g. "aarch64-linux-musl") and writes it into `buf`. */
+static const TargetSpec *resolve_target(const char *name, TargetSpec *buf) {
+    for (size_t i = 0; i < TARGETS_LEN; ++i) {
+        if (strcmp(TARGETS[i].name, name) == 0) return &TARGETS[i];
+    }
+    buf->name = name;
+    buf->zig_triple = name;
+    buf->gcc_prefix = name;
+    buf->suffix = strstr(name, "windows") || strstr(name, "mingw") ? ".exe" : "";
+    buf->is_windows = (strstr(name, "windows") != NULL) || (strstr(name, "mingw") != NULL);
+    return buf;
+}
+
 /* ---- portable subprocess + temp file helpers ------------------------- */
 
 /* Wait-for-completion subprocess. Returns child exit status, or -1 on failure
@@ -195,10 +229,49 @@ static char *compile_to_c(const char *input_path, char **out_source, size_t *out
 
 /* ---- C compiler invocation ------------------------------------------- */
 
-/* Compiler selection precedence:
+/* Search $PATH for an executable named `name`. Returns a static buffer with
+ * the resolved full path, or NULL if not found. Caller must not free. */
+static const char *find_in_path(const char *name) {
+    const char *path = getenv("PATH");
+    if (!path || !*path) return NULL;
+    static char buf[1024];
+    size_t nl = strlen(name);
+    const char *p = path;
+    while (*p) {
+        const char *sep = strchr(p, ':');
+#ifdef _WIN32
+        const char *sep2 = strchr(p, ';');
+        if (sep2 && (!sep || sep2 < sep)) sep = sep2;
+#endif
+        size_t dl = sep ? (size_t)(sep - p) : strlen(p);
+        if (dl > 0 && dl + 1 + nl < sizeof buf) {
+            memcpy(buf, p, dl);
+            buf[dl] = '/';
+            memcpy(buf + dl + 1, name, nl + 1);
+            if (access(buf, F_OK) == 0) return buf;
+#ifdef _WIN32
+            /* Also try with .exe suffix on Windows. */
+            if (dl + 1 + nl + 4 < sizeof buf) {
+                memcpy(buf + dl + 1 + nl, ".exe", 5);
+                if (access(buf, F_OK) == 0) return buf;
+            }
+#endif
+        }
+        if (!sep) break;
+        p = sep + 1;
+    }
+    return NULL;
+}
+
+/* Compiler selection precedence (host build):
  *   1. $QSC_CC override
  *   2. bundled tcc.exe / tcc next to runtime.c (Windows installer ships this)
  *   3. system gcc
+ *
+ * Cross-compile (target != NULL):
+ *   1. zig cc -target <triple>     — if `zig` is on PATH
+ *   2. <prefix>-gcc                — e.g. x86_64-w64-mingw32-gcc
+ *   On failure returns NULL and prints a diagnostic.
  */
 static const char *pick_cc(void) {
     const char *env = getenv("QSC_CC");
@@ -211,6 +284,37 @@ static const char *pick_cc(void) {
     snprintf(buf, sizeof buf, "%s/tcc", dir);
     if (access(buf, F_OK) == 0) return buf;
     return "gcc";
+}
+
+/* Returns either the host pick_cc() result with empty prefix args, or a
+ * cross-compiler invocation (e.g. `zig cc -target X`). Writes prefix args
+ * into `pre_args` (terminating with NULL) and returns the executable name.
+ * On failure returns NULL. */
+static const char *pick_cross_cc(const TargetSpec *t, char **pre_args, size_t pre_cap) {
+    pre_args[0] = NULL;
+    if (!t) return pick_cc();
+
+    if (find_in_path("zig")) {
+        if (pre_cap < 3) return NULL;
+        pre_args[0] = "cc";
+        pre_args[1] = "-target";
+        pre_args[2] = (char *)t->zig_triple;
+        pre_args[3] = NULL;
+        return "zig";
+    }
+
+    static char gcc_name[256];
+    snprintf(gcc_name, sizeof gcc_name, "%s-gcc", t->gcc_prefix);
+    if (find_in_path(gcc_name)) {
+        pre_args[0] = NULL;
+        return gcc_name;
+    }
+
+    fprintf(stderr,
+        "qsc: no cross-compiler found for target '%s'.\n"
+        "     install `zig` (recommended) or `%s-gcc` and retry.\n",
+        t->name, t->gcc_prefix);
+    return NULL;
 }
 
 static int cc_is_tcc(const char *cc) {
@@ -229,20 +333,27 @@ static int cc_skip_libm(const char *cc) {
     return n >= 4 && strcmp(cc + n - 4, ".exe") == 0;
 }
 
-static int run_cc(const char *c_path, const char *out_path, const LinkList *extra_libs) {
-    const char *cc = pick_cc();
-    int skip_libm = cc_skip_libm(cc);
+static int run_cc(const char *c_path, const char *out_path,
+                  const LinkList *extra_libs, const TargetSpec *target) {
+    char *pre_args[8] = {0};
+    const char *cc = target ? pick_cross_cc(target, pre_args, 8) : pick_cc();
+    if (!cc) return 1;
+    int skip_libm = (!target) && cc_skip_libm(cc);
     const char *rt = runtime_c_path();
     char include_flag[1024];
     snprintf(include_flag, sizeof include_flag, "-I%s", runtime_dir());
 
     /* Build argv dynamically so we can append `-l<name>` for each extra lib. */
+    size_t pre_n = 0;
+    while (pre_n < 8 && pre_args[pre_n]) pre_n++;
     size_t extras = extra_libs ? extra_libs->len : 0;
     size_t fixed = skip_libm ? 7 : 8;  /* cc, -o, out, -I..., c_path, rt, [-lm,] -w */
-    char **argv = (char **)calloc(fixed + extras + 1, sizeof(char *));
+    /* +2 leaves headroom for an optional `-static` on Windows targets. */
+    char **argv = (char **)calloc(fixed + pre_n + extras + 2, sizeof(char *));
     if (!argv) { fprintf(stderr, "qsc: oom\n"); return 1; }
     size_t k = 0;
     argv[k++] = (char *)cc;
+    for (size_t i = 0; i < pre_n; ++i) argv[k++] = pre_args[i];
     argv[k++] = "-o";
     argv[k++] = (char *)out_path;
     argv[k++] = include_flag;
@@ -250,6 +361,9 @@ static int run_cc(const char *c_path, const char *out_path, const LinkList *extr
     argv[k++] = (char *)rt;
     if (!skip_libm) argv[k++] = "-lm";
     argv[k++] = "-w";
+    /* Windows cross-builds: link statically so the resulting .exe is a single
+     * file. Mingw's default pulls in libwinpthread-1.dll otherwise. */
+    if (target && target->is_windows) argv[k++] = "-static";
     for (size_t i = 0; i < extras; ++i) {
         const char *name = extra_libs->items[i];
         size_t nl = strlen(name);
@@ -306,7 +420,8 @@ static int mode_emit_c(const char *input, const char *output) {
  *   utils.js          -> utils
  *   Makefile          -> a       (no extension; avoid overwriting input)
  * Result is owned by the caller's buffer. */
-static void default_output_name(const char *input, char *out, size_t out_size) {
+static void default_output_name(const char *input, char *out, size_t out_size,
+                                const TargetSpec *target) {
     const char *base = strrchr(input, '/');
     base = base ? base + 1 : input;
 #ifdef _WIN32
@@ -319,18 +434,27 @@ static void default_output_name(const char *input, char *out, size_t out_size) {
     if (n >= out_size) n = out_size - 1;
     memcpy(out, base, n);
     out[n] = '\0';
-suffix:
+suffix: {
+    /* Target suffix takes precedence; for native builds fall back to the
+     * host convention (.exe on Windows hosts). */
+    const char *want = target ? target->suffix : NULL;
 #ifdef _WIN32
-    {
-        size_t used = strlen(out);
-        if (used + 4 < out_size) memcpy(out + used, ".exe", 5);
-    }
+    if (!want || !want[0]) want = ".exe";
 #endif
+    if (want && want[0]) {
+        size_t used = strlen(out);
+        size_t sl = strlen(want);
+        if (used >= sl && strcmp(out + used - sl, want) == 0) return;
+        if (used + sl + 1 <= out_size) {
+            memcpy(out + used, want, sl + 1);
+        }
+    }
     return;
+}
 }
 
 static int mode_build(const char *input, const char *output, bool then_run,
-                      const LinkList *cli_libs) {
+                      const LinkList *cli_libs, const TargetSpec *target) {
     char *src; size_t len;
     LinkList libs; link_list_init(&libs);
     /* Seed with CLI -l flags so they appear before scanned directives. */
@@ -350,11 +474,11 @@ static int mode_build(const char *input, const char *output, bool then_run,
 
     char default_name[1024];
     if (!output) {
-        default_output_name(input, default_name, sizeof default_name);
+        default_output_name(input, default_name, sizeof default_name, target);
         output = default_name;
     }
     const char *out = output;
-    int rc = run_cc(tmpl, out, &libs);
+    int rc = run_cc(tmpl, out, &libs, target);
     link_list_free(&libs);
     remove(tmpl);
     if (rc != 0) return rc;
@@ -369,7 +493,13 @@ static int mode_build(const char *input, const char *output, bool then_run,
     }
     fprintf(stderr, "%s✔ compiled → %s%s\n", C_GREEN, display, C_RESET);
 
-    if (then_run) return run_binary(display);
+    if (then_run) {
+        if (target) {
+            fprintf(stderr, "qsc: --run skipped: cross-compiled for '%s'\n", target->name);
+            return 0;
+        }
+        return run_binary(display);
+    }
     return 0;
 }
 
@@ -496,6 +626,10 @@ static void print_usage(FILE *f) {
         "  qsc -S file.qs -o -         emit generated C to stdout\n"
         "  qsc --run file.qs           build and run\n"
         "\n"
+        "Cross-compile:\n"
+        "  --target <name>             windows | win64 | win32 | linux | <raw triple>\n"
+        "                              uses `zig cc` if available, otherwise `<prefix>-gcc`\n"
+        "\n"
         "Link flags:\n"
         "  -l<name>  /  -l <name>      link against lib<name> (repeatable)\n"
         "  --link <name>               same as -l <name>\n"
@@ -523,6 +657,7 @@ int main(int argc, char **argv) {
     bool dump_tokens = false;
     const char *output = NULL;
     const char *input = NULL;
+    const char *target_name = NULL;
     LinkList cli_libs; link_list_init(&cli_libs);
 
     for (int i = 1; i < argc; ++i) {
@@ -533,6 +668,12 @@ int main(int argc, char **argv) {
         if (strcmp(a, "--run") == 0) { then_run = true; continue; }
         if (strcmp(a, "--ast") == 0) { dump_ast = true; continue; }
         if (strcmp(a, "--tokens") == 0) { dump_tokens = true; continue; }
+        if (strncmp(a, "--target=", 9) == 0) { target_name = a + 9; continue; }
+        if (strcmp(a, "--target") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "qsc: --target needs an argument\n"); link_list_free(&cli_libs); return 2; }
+            target_name = argv[++i];
+            continue;
+        }
         if (strcmp(a, "-o") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "qsc: -o needs an argument\n"); link_list_free(&cli_libs); return 2; }
             output = argv[++i];
@@ -558,11 +699,14 @@ int main(int argc, char **argv) {
 
     if (!input) { fprintf(stderr, "qsc: no input file\n"); print_usage(stderr); link_list_free(&cli_libs); return 2; }
 
+    TargetSpec custom_target;
+    const TargetSpec *target = target_name ? resolve_target(target_name, &custom_target) : NULL;
+
     int rc;
     if (dump_tokens) rc = mode_dump_tokens(input);
     else if (dump_ast) rc = mode_dump_ast(input);
     else if (emit_c_only) rc = mode_emit_c(input, output);
-    else rc = mode_build(input, output, then_run, &cli_libs);
+    else rc = mode_build(input, output, then_run, &cli_libs, target);
     link_list_free(&cli_libs);
     return rc;
 }

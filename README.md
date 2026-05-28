@@ -267,6 +267,29 @@ and `//` / `/* */` comments are scanned over, so `printf("}}}\n")` inside a
 block does not end it early. For file-scope helpers (structs, typedefs,
 static functions), keep using an external `.c` file with `// @link`.
 
+## Cross-compiling
+
+Pass `--target=<name>` to build for another platform from your dev box.
+`qsc` picks the toolchain in this order:
+
+1. `zig cc -target <triple>` if [`zig`](https://ziglang.org/) is on `PATH`
+   (recommended — one binary covers every target out of the box)
+2. `<prefix>-gcc` matching the target's GNU triple (e.g. `x86_64-w64-mingw32-gcc`)
+
+Friendly aliases plus any raw triple are accepted:
+
+```sh
+qsc --target=windows hello.qs        # → ./hello.exe (static, no DLLs)
+qsc --target=win32   hello.qs        # 32-bit MinGW
+qsc --target=linux   hello.qs        # ELF, host arch
+qsc --target=aarch64-linux-musl app.qs   # raw triple (zig handles this)
+```
+
+Windows targets enable `-static` automatically so the resulting `.exe` is
+a single self-contained file — no `libwinpthread-1.dll` alongside.
+`--run` is skipped for cross-builds (the produced binary may not run
+natively on the host).
+
 ## Usage
 
 ```
