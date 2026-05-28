@@ -6,7 +6,9 @@
 #
 # Environment:
 #   QSC_REPO         GitHub "owner/repo"          (default: Bilal1545/quickscript)
-#   QSC_VERSION      Release tag, or "latest"     (default: latest)
+#   QSC_VERSION      Release tag, "latest", or "twilight" (default: latest).
+#                    "twilight" pulls the most recent main-branch CI build via
+#                    nightly.link instead of a published release.
 #   QSC_PREFIX       Install directory            (default: $env:LOCALAPPDATA\qsc)
 #   QSC_TCC_URL      Override TCC download URL    (default: savannah official 0.9.27 win64)
 #   QSC_SKIP_TCC     Set to 1 to skip TCC bundle  (use your own gcc via $env:QSC_CC)
@@ -20,13 +22,16 @@ $TccUrl  = if ($env:QSC_TCC_URL) { $env:QSC_TCC_URL } else { "https://download.s
 $SkipTcc = $env:QSC_SKIP_TCC -eq "1"
 
 $Asset = "qsc-windows-x86_64"
-$Url = if ($Tag -eq "latest") {
+$Twilight = ($Tag -eq "twilight")
+$Url = if ($Twilight) {
+    "https://nightly.link/$Repo/workflows/build/main/$Asset.zip"
+} elseif ($Tag -eq "latest") {
     "https://github.com/$Repo/releases/latest/download/$Asset.tar.gz"
 } else {
     "https://github.com/$Repo/releases/download/$Tag/$Asset.tar.gz"
 }
 
-if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
+if (-not $Twilight -and -not (Get-Command tar -ErrorAction SilentlyContinue)) {
     throw "qsc: 'tar' is required (built-in on Windows 10 1803+ / Windows 11)"
 }
 
@@ -34,10 +39,16 @@ Write-Host "qsc: downloading $Asset ($Tag) from $Repo"
 
 $Tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "qsc-install-$([guid]::NewGuid().ToString('N'))")
 try {
-    $TarPath = Join-Path $Tmp "qsc.tar.gz"
-    Invoke-WebRequest -Uri $Url -OutFile $TarPath -UseBasicParsing
-    tar -xzf $TarPath -C $Tmp
-    if ($LASTEXITCODE -ne 0) { throw "qsc: failed to extract archive" }
+    if ($Twilight) {
+        $ZipPath = Join-Path $Tmp "qsc.zip"
+        Invoke-WebRequest -Uri $Url -OutFile $ZipPath -UseBasicParsing
+        Expand-Archive -Path $ZipPath -DestinationPath $Tmp -Force
+    } else {
+        $TarPath = Join-Path $Tmp "qsc.tar.gz"
+        Invoke-WebRequest -Uri $Url -OutFile $TarPath -UseBasicParsing
+        tar -xzf $TarPath -C $Tmp
+        if ($LASTEXITCODE -ne 0) { throw "qsc: failed to extract archive" }
+    }
 
     New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 

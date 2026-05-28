@@ -6,7 +6,9 @@
 #
 # Environment:
 #   QSC_REPO     GitHub "owner/repo" (default: Bilal1545/Quickscript)
-#   QSC_VERSION  Release tag, or "latest" (default: latest)
+#   QSC_VERSION  Release tag, "latest", or "twilight" (default: latest).
+#                "twilight" pulls the most recent main-branch CI build via nightly.link
+#                — no GitHub release required.
 #   QSC_PREFIX   Install prefix (default: /usr/local)
 set -eu
 
@@ -46,14 +48,23 @@ esac
 
 asset="qsc-${plat_os}-${plat_arch}"
 
-if [ "$TAG" = "latest" ]; then
+if [ "$TAG" = "twilight" ]; then
+    url="https://nightly.link/${REPO}/workflows/build/main/${asset}.zip"
+    archive_kind="zip"
+elif [ "$TAG" = "latest" ]; then
     url="https://github.com/${REPO}/releases/latest/download/${asset}.tar.gz"
+    archive_kind="tar.gz"
 else
     url="https://github.com/${REPO}/releases/download/${TAG}/${asset}.tar.gz"
+    archive_kind="tar.gz"
 fi
 
 command -v curl >/dev/null 2>&1 || { echo "qsc: 'curl' is required" >&2; exit 1; }
-command -v tar  >/dev/null 2>&1 || { echo "qsc: 'tar' is required" >&2; exit 1; }
+if [ "$archive_kind" = "zip" ]; then
+    command -v unzip >/dev/null 2>&1 || { echo "qsc: 'unzip' is required for twilight installs" >&2; exit 1; }
+else
+    command -v tar >/dev/null 2>&1 || { echo "qsc: 'tar' is required" >&2; exit 1; }
+fi
 command -v gcc  >/dev/null 2>&1 || \
     echo "qsc: warning — 'gcc' not found; qsc requires it at runtime to link compiled programs" >&2
 
@@ -62,8 +73,13 @@ echo "qsc: downloading ${asset} (${TAG}) from ${REPO}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-curl -fsSL "$url" -o "$tmp/qsc.tar.gz"
-tar -xzf "$tmp/qsc.tar.gz" -C "$tmp"
+if [ "$archive_kind" = "zip" ]; then
+    curl -fsSL "$url" -o "$tmp/qsc.zip"
+    unzip -q "$tmp/qsc.zip" -d "$tmp"
+else
+    curl -fsSL "$url" -o "$tmp/qsc.tar.gz"
+    tar -xzf "$tmp/qsc.tar.gz" -C "$tmp"
+fi
 
 bin_dir="$PREFIX/bin"
 share_dir="$PREFIX/share/qsc"
