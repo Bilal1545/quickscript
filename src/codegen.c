@@ -1890,7 +1890,8 @@ static void resolve_c_import(Arena *arena, const char *imported, CImportResolved
 
 char *codegen_generate(AstNode *program, const char *source, size_t source_len,
                        const char *filename, Arena *arena, CodegenError *out_err,
-                       const CImportList *c_imports) {
+                       const CImportList *c_imports,
+                       const AssetList *assets) {
     Codegen c;
     memset(&c, 0, sizeof c);
     c.arena = arena;
@@ -1928,6 +1929,22 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
             } else {
                 emit_const_builder(&c.fns, ci->local, ci->imported, &res->type);
             }
+        }
+    }
+
+    /* Asset imports: register each `_ai_<name>` as a JsValue global and emit
+     * its bytes as a file-scope `static const unsigned char` array next to the
+     * C-import wrappers. */
+    if (assets) {
+        for (size_t i = 0; i < assets->len; ++i) {
+            const AssetImport *ai = &assets->items[i];
+            map_put(&c.globals, arena_strdup(c.arena, ai->local), (void *)1);
+            char *escaped = escape_str_for_c(&c, (const char *)ai->data, ai->len);
+            buf_appendf(&c.fns,
+                "/* asset: %s (%zu bytes) */\n"
+                "static const unsigned char %s_data[] = \"%s\";\n",
+                ai->source_path ? ai->source_path : "?", ai->len,
+                ai->local, escaped);
         }
     }
 
@@ -2031,6 +2048,16 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
             }
         }
         map_free(&seen_init);
+    }
+    /* Bind asset import locals to QS string values backed by the static byte
+     * arrays. Text content is fully visible; binary content with embedded
+     * NUL bytes is truncated at the first NUL (a v1 limitation). */
+    if (assets) {
+        for (size_t i = 0; i < assets->len; ++i) {
+            const AssetImport *ai = &assets->items[i];
+            buf_appendf(&final, "%s = js_string((const char*)%s_data);\n",
+                        ai->local, ai->local);
+        }
     }
     if (c.main_body.data) buf_append_str(&final, c.main_body.data);
     buf_append_str(&final, "return 0;\n}\n");

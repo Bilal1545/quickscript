@@ -56,6 +56,10 @@ typedef struct {
     /* Library names collected from `// @link <name>` directives in any
      * bundled source. NULL when caller doesn't care. */
     LinkList *link_libs;
+
+    /* Asset imports collected across all modules — `import x from "asset:..."`.
+     * NULL when the caller doesn't care (e.g. AST dump). */
+    AssetList *assets;
 } Bundler;
 
 void cimport_list_init(CImportList *l) {
@@ -78,6 +82,19 @@ void link_list_init(LinkList *l) {
 }
 
 void link_list_free(LinkList *l) {
+    free(l->items);
+    l->items = NULL;
+    l->len = 0;
+    l->cap = 0;
+}
+
+void asset_list_init(AssetList *l) {
+    l->items = NULL;
+    l->len = 0;
+    l->cap = 0;
+}
+
+void asset_list_free(AssetList *l) {
     free(l->items);
     l->items = NULL;
     l->len = 0;
@@ -179,6 +196,25 @@ static void scan_link_directives(LinkList *out, Arena *arena,
         }
         i++;
     }
+}
+
+static void asset_push(Bundler *b, const char *local,
+                       const unsigned char *data, size_t len,
+                       const char *source_path) {
+    if (!b->assets) return;
+    AssetList *l = b->assets;
+    if (l->len == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 4;
+        AssetImport *p = (AssetImport *)realloc(l->items, nc * sizeof(*p));
+        if (!p) { fprintf(stderr, "qsc: oom\n"); abort(); }
+        l->items = p;
+        l->cap = nc;
+    }
+    l->items[l->len].local = local;
+    l->items[l->len].data = data;
+    l->items[l->len].len = len;
+    l->items[l->len].source_path = source_path;
+    l->len++;
 }
 
 static void cimport_push(Bundler *b, ModuleInfo *owner,
@@ -873,6 +909,49 @@ static ModuleInfo *process_module(Bundler *b, const char *abs_path,
                 }
                 continue;
             }
+            /* Asset import: "asset:<path>" reads the file at compile time and
+             * binds the default specifier to its bytes as a QS string. */
+            if (src_path[0] == 'a' && src_path[1] == 's' && src_path[2] == 's'
+                && src_path[3] == 'e' && src_path[4] == 't' && src_path[5] == ':') {
+                const char *raw = src_path + 6;
+                if (!raw[0]) {
+                    mod_set_error(b, node, abs_path, "Empty path in import 'asset:'");
+                    return NULL;
+                }
+                for (size_t j = 0; j < node->import_decl.specifiers.len; ++j) {
+                    if (node->import_decl.specifiers.items[j]->kind != AST_IMPORT_DEFAULT_SPECIFIER) {
+                        mod_set_error(b, node, abs_path,
+                            "Asset imports only support default form: import X from \"asset:...\"");
+                        return NULL;
+                    }
+                }
+                char *full;
+                if (raw[0] == '/') {
+                    full = arena_strdup(b->arena, raw);
+                } else {
+                    full = path_join(b->arena, dir, raw);
+                }
+                size_t alen = 0;
+                char *abuf = read_file_to_arena(b, full, &alen);
+                if (!abuf) {
+                    mod_set_error(b, node, abs_path,
+                                  "Cannot read asset '%s'", src_path);
+                    return NULL;
+                }
+                for (size_t j = 0; j < node->import_decl.specifiers.len; ++j) {
+                    AstNode *spec = node->import_decl.specifiers.items[j];
+                    const char *local = spec->import_specifier.local->ident.name;
+                    size_t pl = strlen(info->prefix), ll = strlen(local);
+                    char *renamed = (char *)arena_alloc(b->arena, 4 + pl + ll + 1);
+                    memcpy(renamed, "_ai_", 4);
+                    memcpy(renamed + 4, info->prefix, pl);
+                    memcpy(renamed + 4 + pl, local, ll + 1);
+                    map_put(&info->rename_map, local, renamed);
+                    asset_push(b, renamed, (const unsigned char *)abuf, alen,
+                               arena_strdup(b->arena, full));
+                }
+                continue;
+            }
             if (!(src_path[0] == '.' || src_path[0] == '/')) {
                 mod_set_error(b, node, abs_path, "Only relative imports are supported: '%s'", src_path);
                 return NULL;
@@ -908,12 +987,14 @@ AstNode *bundle_modules(AstNode *entry_ast,
                         const char *entry_filename,
                         Arena *arena, ParseError *out_err,
                         CImportList *out_c_imports,
-                        LinkList *out_link_libs) {
+                        LinkList *out_link_libs,
+                        AssetList *out_assets) {
     Bundler b;
     memset(&b, 0, sizeof b);
     b.arena = arena;
     b.c_imports = out_c_imports;
     b.link_libs = out_link_libs;
+    b.assets = out_assets;
     map_init(&b.modules);
 
     /* Scan the entry source for @link directives. Sub-modules are scanned

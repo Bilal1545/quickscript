@@ -212,6 +212,29 @@ files; `fs.writeFile` overwrites. `fs.readDir` lists entries excluding
 message — catch them with `try { ... } catch (e) { ... }` if you'd rather
 handle them yourself.
 
+## Embedded assets
+
+Prefix an import source with `asset:` to bake a file's contents directly
+into the compiled binary. Useful for distributing a single self-contained
+executable with templates, configs, SQL schemas, HTML, or any other text
+payload — no sidecar files to ship:
+
+```js
+import config   from "asset:./config.json"
+import schema   from "asset:./schema.sql"
+import template from "asset:./welcome.html"
+
+let cfg = JSON.parse(config)
+print("loaded", cfg.name, "from", config.length, "bytes")
+```
+
+The path is resolved relative to the importing module, read at compile
+time, and emitted as a `static const unsigned char[]` array next to the
+generated C. Only the default-import form is supported, and the binding
+behaves like a plain QS string. Embedded NUL bytes in binary assets will
+truncate the string at the first NUL — for binary payloads, reach into
+the underlying `<local>_data` symbol from an inline C block.
+
 ## Inline C blocks
 
 When a function-by-function FFI binding feels too coarse, you can drop raw C

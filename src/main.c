@@ -171,18 +171,22 @@ static char *compile_to_c(const char *input_path, char **out_source, size_t *out
     if (!prog) { emit_err(QSC_ERR_PARSE, input_path, perr.message, perr.line, perr.col, src, len); arena_free(&a); return NULL; }
 
     CImportList c_imports;
+    AssetList assets;
     cimport_list_init(&c_imports);
-    AstNode *bundled = bundle_modules(prog, src, len, input_path, &a, &perr, &c_imports, link_libs);
+    asset_list_init(&assets);
+    AstNode *bundled = bundle_modules(prog, src, len, input_path, &a, &perr, &c_imports, link_libs, &assets);
     if (!bundled) {
         emit_err(QSC_ERR_PARSE, input_path, perr.message, perr.line, perr.col, src, len);
         cimport_list_free(&c_imports);
+        asset_list_free(&assets);
         arena_free(&a);
         return NULL;
     }
 
     CodegenError cerr = {0};
-    char *c_src = codegen_generate(bundled, src, len, input_path, &a, &cerr, &c_imports);
+    char *c_src = codegen_generate(bundled, src, len, input_path, &a, &cerr, &c_imports, &assets);
     cimport_list_free(&c_imports);
+    asset_list_free(&assets);
     if (!c_src) { emit_err(QSC_ERR_CODEGEN, input_path, cerr.message, cerr.line, cerr.col, src, len); arena_free(&a); return NULL; }
 
     /* Note: we leak the arena across builds intentionally; main exits afterward. */
@@ -405,7 +409,7 @@ static int mode_dump_ast(const char *path) {
     ParseError err = {0};
     AstNode *prog = parse_source(src, len, path, &a, &err);
     if (!prog) { emit_err(QSC_ERR_PARSE, path, err.message, err.line, err.col, src, len); arena_free(&a); free(src); return 1; }
-    AstNode *bundled = bundle_modules(prog, src, len, path, &a, &err, NULL, NULL);
+    AstNode *bundled = bundle_modules(prog, src, len, path, &a, &err, NULL, NULL, NULL);
     if (!bundled) { emit_err(QSC_ERR_PARSE, path, err.message, err.line, err.col, src, len); arena_free(&a); free(src); return 1; }
     AstPrintCtx ctx = {0};
     AstVisitor v = {.user = &ctx, .enter = ast_print_enter, .leave = ast_print_leave};

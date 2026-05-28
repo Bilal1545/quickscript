@@ -66,9 +66,11 @@ typedef struct {
 /* Emit the full C source for `program`. Returns a malloc'd string on success
  * (caller frees) or NULL with err populated on failure.
  *
- * `c_imports` may be NULL when there are no C-header imports. */
+ * `c_imports` and `assets` may be NULL when there are no imports of that
+ * kind. */
 char *codegen_generate(AstNode *program, const char *source, size_t source_len,
                        const char *filename, Arena *arena, CodegenError *out_err,
-                       const CImportList *c_imports);
+                       const CImportList *c_imports,
+                       const AssetList *assets);
 
 #endif /* QSC_CODEGEN_H */
