@@ -40,6 +40,7 @@ JsValue* js_SyntaxError_global = NULL;
 JsValue* js_process = NULL;
 JsValue* js_fs = NULL;
 JsValue* js_path = NULL;
+JsValue* js_http = NULL;
 
 // ==========================================
 // CONSTRUCTORS
@@ -2070,12 +2071,21 @@ JsValue* js_static_dispatch(JsValue* ctor, const char* method, JsValue** args, i
 #ifdef _WIN32
   #include <direct.h>
   #include <io.h>
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #pragma comment(lib, "ws2_32.lib")
   #define QSC_PATH_SEP "\\"
   #define QSC_PATH_SEP_CH '\\'
   #define qsc_mkdir(p)  _mkdir(p)
 #else
   #include <unistd.h>
   #include <sys/stat.h>
+  #include <sys/wait.h>
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <netdb.h>
+  #include <arpa/inet.h>
+  #include <poll.h>
   #define QSC_PATH_SEP "/"
   #define QSC_PATH_SEP_CH '/'
   #define qsc_mkdir(p)  mkdir((p), 0777)
@@ -2291,6 +2301,369 @@ static JsValue* js_path_isAbsolute_fn(JsValue** args, int argc) {
 }
 
 // ==========================================
+// STDLIB: spawn (subprocess with captured stdout/stderr)
+// ==========================================
+
+/* Pulls bytes from `fd` until EOF, appending to *buf (NUL-terminated, malloc'd
+ * — caller frees). Returns total bytes read. */
+typedef struct { char* data; size_t len; size_t cap; } QscByteBuf;
+static void qsc_bb_init(QscByteBuf* b) { b->data = NULL; b->len = 0; b->cap = 0; }
+static void qsc_bb_grow(QscByteBuf* b, size_t need) {
+    if (b->cap >= need) return;
+    size_t nc = b->cap ? b->cap * 2 : 1024;
+    while (nc < need) nc *= 2;
+    b->data = (char*)realloc(b->data, nc);
+    b->cap = nc;
+}
+static void qsc_bb_append(QscByteBuf* b, const char* p, size_t n) {
+    qsc_bb_grow(b, b->len + n + 1);
+    memcpy(b->data + b->len, p, n);
+    b->len += n;
+    b->data[b->len] = '\0';
+}
+static char* qsc_bb_take(QscByteBuf* b) {
+    qsc_bb_grow(b, b->len + 1);
+    b->data[b->len] = '\0';
+    char* r = b->data;
+    b->data = NULL; b->len = 0; b->cap = 0;
+    return r;
+}
+
+#ifdef _WIN32
+JsValue* js_spawn_fn(JsValue** args, int argc) {
+    (void)args; (void)argc;
+    js_throw(js_error_new("Error", "spawn: not yet supported on Windows"));
+    return js_undefined();
+}
+#else
+JsValue* js_spawn_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "spawn: command required"));
+    char* cmd = js_to_string(args[0]);
+
+    JsValue* args_arr = (argc > 1) ? args[1] : NULL;
+    int n_args = (args_arr && args_arr->type == JS_ARRAY) ? args_arr->array.length : 0;
+    char** child_argv = (char**)calloc((size_t)n_args + 2, sizeof(char*));
+    child_argv[0] = cmd;
+    for (int i = 0; i < n_args; i++) child_argv[i+1] = js_to_string(args_arr->array.items[i]);
+    child_argv[n_args+1] = NULL;
+
+    int out_pipe[2], err_pipe[2];
+    if (pipe(out_pipe) < 0 || pipe(err_pipe) < 0) {
+        js_throw(js_error_new("Error", "spawn: pipe() failed"));
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        js_throw(js_error_new("Error", "spawn: fork() failed"));
+    }
+    if (pid == 0) {
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        execvp(cmd, child_argv);
+        _exit(127);
+    }
+    close(out_pipe[1]); close(err_pipe[1]);
+
+    QscByteBuf outbuf, errbuf;
+    qsc_bb_init(&outbuf); qsc_bb_init(&errbuf);
+
+    /* Multiplex with poll so a noisy stderr can't deadlock waiting for stdout. */
+    struct pollfd pfds[2] = {
+        { .fd = out_pipe[0], .events = POLLIN },
+        { .fd = err_pipe[0], .events = POLLIN },
+    };
+    int open_count = 2;
+    char chunk[4096];
+    while (open_count > 0) {
+        int pr = poll(pfds, 2, -1);
+        if (pr < 0) break;
+        for (int i = 0; i < 2; i++) {
+            if (pfds[i].fd < 0) continue;
+            if (pfds[i].revents & (POLLIN | POLLHUP)) {
+                ssize_t n = read(pfds[i].fd, chunk, sizeof chunk);
+                if (n > 0) {
+                    qsc_bb_append(i == 0 ? &outbuf : &errbuf, chunk, (size_t)n);
+                } else {
+                    close(pfds[i].fd);
+                    pfds[i].fd = -1;
+                    open_count--;
+                }
+            }
+        }
+    }
+    if (pfds[0].fd >= 0) close(pfds[0].fd);
+    if (pfds[1].fd >= 0) close(pfds[1].fd);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    int signo = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+
+    char* out_s = qsc_bb_take(&outbuf);
+    char* err_s = qsc_bb_take(&errbuf);
+
+    JsValue* result = js_object_new();
+    js_object_set(result, "stdout", js_string(out_s ? out_s : ""));
+    js_object_set(result, "stderr", js_string(err_s ? err_s : ""));
+    js_object_set(result, "status", js_number(code));
+    js_object_set(result, "signal", signo ? js_number(signo) : js_null());
+
+    free(out_s); free(err_s);
+    for (int i = 0; i < n_args; i++) free(child_argv[i+1]);
+    free(child_argv);
+    free(cmd);
+    return result;
+}
+#endif
+
+// ==========================================
+// STDLIB: http (plaintext HTTP/1.0 client)
+// ==========================================
+
+typedef struct {
+    char scheme[16];
+    char host[256];
+    int  port;
+    char path[1024];
+} QscUrl;
+
+static int qsc_url_parse(const char* url, QscUrl* out) {
+    memset(out, 0, sizeof *out);
+    const char* p = url;
+    const char* colon = strstr(p, "://");
+    if (!colon || (size_t)(colon - p) >= sizeof out->scheme) return 0;
+    memcpy(out->scheme, p, colon - p);
+    out->scheme[colon - p] = '\0';
+    p = colon + 3;
+
+    const char* slash = strchr(p, '/');
+    const char* host_end = slash ? slash : p + strlen(p);
+    const char* port_colon = NULL;
+    for (const char* q = p; q < host_end; q++) if (*q == ':') { port_colon = q; break; }
+
+    const char* host_stop = port_colon ? port_colon : host_end;
+    if ((size_t)(host_stop - p) >= sizeof out->host) return 0;
+    memcpy(out->host, p, host_stop - p);
+    out->host[host_stop - p] = '\0';
+
+    if (port_colon) {
+        out->port = atoi(port_colon + 1);
+    } else {
+        out->port = (strcmp(out->scheme, "https") == 0) ? 443 : 80;
+    }
+
+    if (slash) {
+        if (strlen(slash) >= sizeof out->path) return 0;
+        strcpy(out->path, slash);
+    } else {
+        strcpy(out->path, "/");
+    }
+    return 1;
+}
+
+#ifdef _WIN32
+static int qsc_winsock_started = 0;
+static void qsc_winsock_init(void) {
+    if (qsc_winsock_started) return;
+    WSADATA d;
+    WSAStartup(MAKEWORD(2, 2), &d);
+    qsc_winsock_started = 1;
+}
+  #define qsc_close_socket(s) closesocket(s)
+  #define QSC_SOCK SOCKET
+#else
+  #define qsc_winsock_init() ((void)0)
+  #define qsc_close_socket(s) close(s)
+  #define QSC_SOCK int
+#endif
+
+static JsValue* qsc_http_do(const char* method, const char* url,
+                            const char* body, size_t body_len,
+                            const char* content_type) {
+    QscUrl u;
+    if (!qsc_url_parse(url, &u)) {
+        js_throw(js_error_new("Error", "http: invalid URL"));
+    }
+    if (strcmp(u.scheme, "https") == 0) {
+        js_throw(js_error_new("Error", "http: https not supported in v1 (plain http only)"));
+    }
+    if (strcmp(u.scheme, "http") != 0) {
+        js_throw(js_error_new("Error", "http: unsupported scheme"));
+    }
+
+    qsc_winsock_init();
+
+    struct addrinfo hints, *ai = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    char port_buf[16]; snprintf(port_buf, sizeof port_buf, "%d", u.port);
+    if (getaddrinfo(u.host, port_buf, &hints, &ai) != 0 || !ai) {
+        char msg[512]; snprintf(msg, sizeof msg, "http: cannot resolve '%s'", u.host);
+        js_throw(js_error_new("Error", msg));
+    }
+
+    QSC_SOCK s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if ((long long)s < 0) {
+        freeaddrinfo(ai);
+        js_throw(js_error_new("Error", "http: socket() failed"));
+    }
+    if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) < 0) {
+        freeaddrinfo(ai);
+        qsc_close_socket(s);
+        char msg[512]; snprintf(msg, sizeof msg, "http: connect to %s:%d failed", u.host, u.port);
+        js_throw(js_error_new("Error", msg));
+    }
+    freeaddrinfo(ai);
+
+    /* Build the request. HTTP/1.0 with `Connection: close` keeps things
+     * simple: the server hangs up after the body so we can just read to EOF. */
+    QscByteBuf req; qsc_bb_init(&req);
+    char line[1024];
+    snprintf(line, sizeof line, "%s %s HTTP/1.0\r\n", method, u.path);
+    qsc_bb_append(&req, line, strlen(line));
+    snprintf(line, sizeof line, "Host: %s\r\n", u.host);
+    qsc_bb_append(&req, line, strlen(line));
+    qsc_bb_append(&req, "Connection: close\r\n", 19);
+    qsc_bb_append(&req, "User-Agent: quickscript/0.1\r\n", 29);
+    if (body && body_len > 0) {
+        snprintf(line, sizeof line, "Content-Length: %zu\r\n", body_len);
+        qsc_bb_append(&req, line, strlen(line));
+        if (content_type) {
+            snprintf(line, sizeof line, "Content-Type: %s\r\n", content_type);
+            qsc_bb_append(&req, line, strlen(line));
+        }
+    }
+    qsc_bb_append(&req, "\r\n", 2);
+    if (body && body_len > 0) qsc_bb_append(&req, body, body_len);
+
+    size_t sent = 0;
+    while (sent < req.len) {
+        int n = send(s, req.data + sent, (int)(req.len - sent), 0);
+        if (n <= 0) {
+            free(req.data); qsc_close_socket(s);
+            js_throw(js_error_new("Error", "http: send() failed"));
+        }
+        sent += (size_t)n;
+    }
+    free(req.data);
+
+    QscByteBuf resp; qsc_bb_init(&resp);
+    char chunk[4096];
+    for (;;) {
+        int n = recv(s, chunk, sizeof chunk, 0);
+        if (n < 0) {
+            qsc_close_socket(s);
+            free(resp.data);
+            js_throw(js_error_new("Error", "http: recv() failed"));
+        }
+        if (n == 0) break;
+        qsc_bb_append(&resp, chunk, (size_t)n);
+    }
+    qsc_close_socket(s);
+
+    /* Parse: status line, headers (CRLF-delimited, blank line ends), body. */
+    char* hdr_end = strstr(resp.data, "\r\n\r\n");
+    if (!hdr_end) {
+        free(resp.data);
+        js_throw(js_error_new("Error", "http: malformed response (no header terminator)"));
+    }
+    *hdr_end = '\0';
+    const char* body_start = hdr_end + 4;
+    size_t body_size = resp.len - (size_t)(body_start - resp.data);
+
+    /* Status line */
+    int status_code = 0;
+    char status_text[256] = "";
+    {
+        const char* sp = strchr(resp.data, ' ');
+        if (sp) {
+            status_code = atoi(sp + 1);
+            const char* sp2 = strchr(sp + 1, ' ');
+            const char* eol = strstr(resp.data, "\r\n");
+            const char* st_start = sp2 ? sp2 + 1 : NULL;
+            const char* st_end = eol ? eol : resp.data + strlen(resp.data);
+            if (st_start && st_start < st_end) {
+                size_t n = (size_t)(st_end - st_start);
+                if (n >= sizeof status_text) n = sizeof status_text - 1;
+                memcpy(status_text, st_start, n);
+                status_text[n] = '\0';
+            }
+        }
+    }
+
+    /* Headers */
+    JsValue* headers = js_object_new();
+    {
+        const char* p = strstr(resp.data, "\r\n");
+        if (p) p += 2;
+        while (p && *p) {
+            const char* eol = strstr(p, "\r\n");
+            const char* line_end = eol ? eol : p + strlen(p);
+            const char* colon = NULL;
+            for (const char* q = p; q < line_end; q++) if (*q == ':') { colon = q; break; }
+            if (colon) {
+                size_t kn = (size_t)(colon - p);
+                const char* v = colon + 1;
+                while (v < line_end && (*v == ' ' || *v == '\t')) v++;
+                size_t vn = (size_t)(line_end - v);
+                char* k = (char*)malloc(kn + 1);
+                memcpy(k, p, kn); k[kn] = '\0';
+                /* lowercase key for Node-style access */
+                for (size_t i = 0; i < kn; i++) if (k[i] >= 'A' && k[i] <= 'Z') k[i] = (char)(k[i] - 'A' + 'a');
+                char* val = (char*)malloc(vn + 1);
+                memcpy(val, v, vn); val[vn] = '\0';
+                js_object_set(headers, k, js_string(val));
+                free(k); free(val);
+            }
+            if (!eol) break;
+            p = eol + 2;
+        }
+    }
+
+    /* Body — copy out as a NUL-terminated string. Binary bodies with embedded
+     * NUL bytes are truncated for now (same v1 limit as asset imports). */
+    char* body_str = (char*)malloc(body_size + 1);
+    memcpy(body_str, body_start, body_size);
+    body_str[body_size] = '\0';
+
+    JsValue* result = js_object_new();
+    js_object_set(result, "status", js_number(status_code));
+    js_object_set(result, "statusText", js_string(status_text));
+    js_object_set(result, "headers", headers);
+    js_object_set(result, "body", js_string(body_str));
+
+    free(body_str);
+    free(resp.data);
+    return result;
+}
+
+static JsValue* js_http_get_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "http.get: url required"));
+    char* url = js_to_string(args[0]);
+    JsValue* r = qsc_http_do("GET", url, NULL, 0, NULL);
+    free(url);
+    return r;
+}
+
+static JsValue* js_http_post_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "http.post: url required"));
+    char* url = js_to_string(args[0]);
+    char* body = (argc > 1) ? js_to_string(args[1]) : strdup("");
+    char* ctype = NULL;
+    if (argc > 2 && args[2]->type == JS_OBJECT) {
+        JsValue* ct = js_object_get(args[2], "contentType");
+        if (ct && ct->type == JS_STRING) ctype = strdup(ct->string);
+    }
+    JsValue* r = qsc_http_do("POST", url, body, strlen(body),
+                             ctype ? ctype : "application/x-www-form-urlencoded");
+    free(url); free(body); free(ctype);
+    return r;
+}
+
+// ==========================================
 // RUNTIME INIT
 // ==========================================
 
@@ -2410,6 +2783,11 @@ void js_runtime_init(int argc, char** argv) {
     js_object_set(js_path, "dirname",    js_function(js_path_dirname_fn));
     js_object_set(js_path, "extname",    js_function(js_path_extname_fn));
     js_object_set(js_path, "isAbsolute", js_function(js_path_isAbsolute_fn));
+
+    // http
+    js_http = js_object_new();
+    js_object_set(js_http, "get",  js_function(js_http_get_fn));
+    js_object_set(js_http, "post", js_function(js_http_post_fn));
 }
 
 #ifdef _WIN32

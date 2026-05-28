@@ -18,6 +18,7 @@ static const Pair BUILTIN_FUNCTIONS[] = {
     {"parseFloat", "js_parseFloat_fn"},
     {"parseInt",   "js_parseInt_fn"},
     {"print",      "js_print"},
+    {"spawn",      "js_spawn_fn"},
 };
 #define BUILTIN_FUNCTIONS_LEN (sizeof BUILTIN_FUNCTIONS / sizeof BUILTIN_FUNCTIONS[0])
 
@@ -38,6 +39,7 @@ static const Pair GLOBAL_VARS[] = {
     {"TypeError",   "js_TypeError_global"},
     {"console",     "js_console"},
     {"fs",          "js_fs"},
+    {"http",        "js_http"},
     {"path",        "js_path"},
     {"process",     "js_process"},
     {"undefined",   "js_undefined()"},

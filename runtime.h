@@ -260,6 +260,7 @@ JsValue* js_print(JsValue** args, int argc);
 JsValue* js_console_log(JsValue** args, int argc);
 JsValue* js_ask_wrapper(JsValue** args, int argc);
 JsValue* js_execute_wrapper(JsValue** args, int argc);
+JsValue* js_spawn_fn(JsValue** args, int argc);
 JsValue* js_parseInt_fn(JsValue** args, int argc);
 JsValue* js_parseFloat_fn(JsValue** args, int argc);
 JsValue* js_isNaN_fn(JsValue** args, int argc);
@@ -295,6 +296,7 @@ extern JsValue* js_SyntaxError_global;
 extern JsValue* js_process;
 extern JsValue* js_fs;
 extern JsValue* js_path;
+extern JsValue* js_http;
 
 // ==========================================
 // RUNTIME INIT

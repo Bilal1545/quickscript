@@ -212,6 +212,41 @@ files; `fs.writeFile` overwrites. `fs.readDir` lists entries excluding
 message — catch them with `try { ... } catch (e) { ... }` if you'd rather
 handle them yourself.
 
+### Subprocess
+
+```js
+let r = spawn("git", ["rev-parse", "HEAD"])
+if (r.status !== 0) {
+    process.exit(r.status)
+}
+print("HEAD =", r.stdout.trim())
+```
+
+`spawn(cmd, [args])` blocks until the child exits and returns
+`{ stdout, stderr, status, signal }`. The argv list is `execvp`-style —
+no shell parsing, no globbing. Pass an explicit shell if you need one:
+`spawn("sh", ["-c", "ls | wc -l"])`. POSIX only for now; Windows throws a
+clear "not yet supported" error.
+
+### HTTP client
+
+```js
+let r = http.get("http://example.com/")
+print(r.status, r.statusText)
+print(r.headers["content-type"])
+print(r.body.slice(0, 80))
+
+let p = http.post("http://api.example.com/items", JSON.stringify({n: 1}),
+                  { contentType: "application/json" })
+print("posted:", p.status)
+```
+
+Synchronous, plaintext HTTP/1.0 with `Connection: close` — no chunked
+transfer, no keep-alive, no TLS. Hitting an `https://` URL raises a
+clear error; for HTTPS today, `spawn("curl", [...])` is the pragmatic
+escape hatch. The response object carries `status`, `statusText`, a
+lowercase-keyed `headers` object, and `body` as a string.
+
 ## Embedded assets
 
 Prefix an import source with `asset:` to bake a file's contents directly
