@@ -941,11 +941,30 @@ static ModuleInfo *process_module(Bundler *b, const char *abs_path,
                 for (size_t j = 0; j < node->import_decl.specifiers.len; ++j) {
                     AstNode *spec = node->import_decl.specifiers.items[j];
                     const char *local = spec->import_specifier.local->ident.name;
-                    size_t pl = strlen(info->prefix), ll = strlen(local);
-                    char *renamed = (char *)arena_alloc(b->arena, 4 + pl + ll + 1);
-                    memcpy(renamed, "_ai_", 4);
-                    memcpy(renamed + 4, info->prefix, pl);
-                    memcpy(renamed + 4 + pl, local, ll + 1);
+                    /* Stable, prefix-free name: `_ai_<local>` for entry-module
+                     * imports; `_ai_<counter>_<local>` once we collide with
+                     * a name already taken (e.g. another module importing a
+                     * different file with the same binding). Predictable in
+                     * the common single-file case so users can reach `_ai_X_data`
+                     * from inline C blocks. */
+                    size_t ll = strlen(local);
+                    char *base = (char *)arena_alloc(b->arena, 4 + ll + 1);
+                    memcpy(base, "_ai_", 4);
+                    memcpy(base + 4, local, ll + 1);
+                    char *renamed = base;
+                    int dup = 0;
+                    if (b->assets) {
+                        for (size_t k = 0; k < b->assets->len; ++k) {
+                            if (strcmp(b->assets->items[k].local, renamed) == 0) {
+                                dup = 1; break;
+                            }
+                        }
+                    }
+                    if (dup) {
+                        renamed = (char *)arena_alloc(b->arena, 4 + 16 + ll + 1);
+                        snprintf(renamed, 4 + 16 + ll + 1, "_ai_%zu_%s",
+                                 b->assets ? b->assets->len : 0, local);
+                    }
                     map_put(&info->rename_map, local, renamed);
                     asset_push(b, renamed, (const unsigned char *)abuf, alen,
                                arena_strdup(b->arena, full));

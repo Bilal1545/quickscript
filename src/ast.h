@@ -139,6 +139,7 @@ struct AstNode {
     uint32_t end;
     uint32_t line;
     uint32_t col;
+    const char *filename;       /* set by parser via make_node; may be NULL */
 
     /* per-kind payload — only the relevant fields are filled. Memory is cheap
      * (arena-backed), so a single fat struct is simpler than a tagged union. */

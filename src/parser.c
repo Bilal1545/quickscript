@@ -90,6 +90,7 @@ static AstNode *make_node(Parser *p, AstKind k, const Token *start) {
     n->line = start->line;
     n->col = start->col;
     n->end = start->end;
+    n->filename = p->filename;
     return n;
 }
 

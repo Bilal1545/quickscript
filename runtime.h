@@ -245,6 +245,11 @@ extern jmp_buf js_try_stack[MAX_TRY_DEPTH];
 extern JsValue* js_exception_stack[MAX_TRY_DEPTH];
 extern int js_try_depth;
 
+/* Codegen updates these before each statement so uncaught throws and
+ * runtime errors can point back at the offending QS source line. */
+extern const char* _qsc_cur_file;
+extern int _qsc_cur_line;
+
 void js_throw(JsValue* val);
 
 // ==========================================

@@ -830,8 +830,24 @@ static void gen_block_inner(Codegen *c, AstNode *node, Buffer *out) {
     }
 }
 
+/* Emit a runtime-line update before the statement so uncaught throws can
+ * surface a QS-source line. We always emit (cheap one-int assignment) — no
+ * cross-buffer dedupe because gen_stmt is called across main_body / fns /
+ * lambdas in non-linear order. Filename changes are emitted alongside. */
+static void emit_loc_update(Codegen *c, AstNode *n, Buffer *out) {
+    if (!n || n->line == 0) return;
+    if (n->filename) {
+        char *esc = escape_str_for_c(c, n->filename, strlen(n->filename));
+        buf_appendf(out, "_qsc_cur_file = \"%s\"; _qsc_cur_line = %u;\n",
+                    esc, n->line);
+    } else {
+        buf_appendf(out, "_qsc_cur_line = %u;\n", n->line);
+    }
+}
+
 static void gen_stmt(Codegen *c, AstNode *n, Buffer *out) {
     if (c->err.present || !n) return;
+    emit_loc_update(c, n, out);
     switch (n->kind) {
         case AST_BLOCK_STMT: gen_block(c, n, out); return;
         case AST_VAR_DECL:   gen_var_decl(c, n, false, out); return;
@@ -1955,8 +1971,10 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
         if (node->kind == AST_FN_DECL) {
             gen_fn_decl(&c, node, &c.fns);
         } else if (node->kind == AST_CLASS_DECL) {
+            emit_loc_update(&c, node, &c.main_body);
             gen_class_decl(&c, node, &c.main_body);
         } else if (node->kind == AST_VAR_DECL) {
+            emit_loc_update(&c, node, &c.main_body);
             gen_var_decl(&c, node, true, &c.main_body);
         } else {
             gen_stmt(&c, node, &c.main_body);

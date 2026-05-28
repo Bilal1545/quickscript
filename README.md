@@ -233,7 +233,8 @@ time, and emitted as a `static const unsigned char[]` array next to the
 generated C. Only the default-import form is supported, and the binding
 behaves like a plain QS string. Embedded NUL bytes in binary assets will
 truncate the string at the first NUL — for binary payloads, reach into
-the underlying `<local>_data` symbol from an inline C block.
+the underlying `_ai_<local>_data` symbol from an inline C block (the
+full byte length is available as `sizeof(_ai_<local>_data) - 1`).
 
 ## Inline C blocks
 

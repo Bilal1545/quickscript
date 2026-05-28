@@ -17,6 +17,9 @@ jmp_buf js_try_stack[MAX_TRY_DEPTH];
 JsValue* js_exception_stack[MAX_TRY_DEPTH];
 int js_try_depth = 0;
 
+const char* _qsc_cur_file = NULL;
+int _qsc_cur_line = 0;
+
 // ==========================================
 // GLOBAL OBJECTS
 // ==========================================
@@ -1157,7 +1160,13 @@ void js_throw(JsValue* val) {
         longjmp(js_try_stack[js_try_depth], 1);
     }
     char* msg = js_to_string(val);
-    fprintf(stderr, "Uncaught: %s\n", msg);
+    if (_qsc_cur_file && _qsc_cur_line > 0) {
+        fprintf(stderr, "%s:%d: Uncaught %s\n", _qsc_cur_file, _qsc_cur_line, msg);
+    } else if (_qsc_cur_line > 0) {
+        fprintf(stderr, "<unknown>:%d: Uncaught %s\n", _qsc_cur_line, msg);
+    } else {
+        fprintf(stderr, "Uncaught: %s\n", msg);
+    }
     free(msg);
     exit(1);
 }
