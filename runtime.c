@@ -1684,7 +1684,15 @@ JsValue* js_date_method(JsValue* obj, const char* method, JsValue** args, int ar
     if (strcmp(method, "getHours") == 0)    return js_number(tm.tm_hour);
     if (strcmp(method, "getMinutes") == 0)  return js_number(tm.tm_min);
     if (strcmp(method, "getSeconds") == 0)  return js_number(tm.tm_sec);
-    if (strcmp(method, "getTimezoneOffset") == 0) return js_number(-(double)tm.tm_gmtoff / 60.0);
+    if (strcmp(method, "getTimezoneOffset") == 0) {
+#ifdef _WIN32
+        _tzset();
+        long off = -_timezone + (tm.tm_isdst > 0 ? 3600 : 0);
+#else
+        long off = tm.tm_gmtoff;
+#endif
+        return js_number(-(double)off / 60.0);
+    }
     if (strcmp(method, "toString") == 0 || strcmp(method, "toDateString") == 0 || strcmp(method, "toLocaleString") == 0) {
         char buf[64];
         strftime(buf, sizeof(buf), "%a %b %d %Y %H:%M:%S", &tm);
