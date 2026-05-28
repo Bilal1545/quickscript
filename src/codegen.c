@@ -2013,8 +2013,8 @@ char *codegen_generate(AstNode *program, const char *source, size_t source_len,
     buf_append_char(&final, '\n');
 
     /* main() */
-    buf_append_str(&final, "int main(void) {\n");
-    buf_append_str(&final, "js_runtime_init();\n");
+    buf_append_str(&final, "int main(int _qsc_argc, char** _qsc_argv) {\n");
+    buf_append_str(&final, "js_runtime_init(_qsc_argc, _qsc_argv);\n");
     /* Bind c-import locals before user code runs. Dedupe via seen_c_locals. */
     if (c_imports) {
         Map seen_init;

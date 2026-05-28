@@ -37,6 +37,9 @@ static const Pair GLOBAL_VARS[] = {
     {"SyntaxError", "js_SyntaxError_global"},
     {"TypeError",   "js_TypeError_global"},
     {"console",     "js_console"},
+    {"fs",          "js_fs"},
+    {"path",        "js_path"},
+    {"process",     "js_process"},
     {"undefined",   "js_undefined()"},
 };
 #define GLOBAL_VARS_LEN (sizeof GLOBAL_VARS / sizeof GLOBAL_VARS[0])

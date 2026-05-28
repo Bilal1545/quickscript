@@ -287,11 +287,14 @@ extern JsValue* js_Error_global;
 extern JsValue* js_TypeError_global;
 extern JsValue* js_RangeError_global;
 extern JsValue* js_SyntaxError_global;
+extern JsValue* js_process;
+extern JsValue* js_fs;
+extern JsValue* js_path;
 
 // ==========================================
 // RUNTIME INIT
 // ==========================================
 
-void js_runtime_init(void);
+void js_runtime_init(int argc, char** argv);
 
 #endif

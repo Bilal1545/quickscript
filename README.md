@@ -174,6 +174,44 @@ The directive must be the first non-whitespace content of its comment
 intentionally ignored). Each imported module is scanned, so a library
 dependency travels with the file that needs it.
 
+## Scripting stdlib
+
+Three globals are available out of the box for shell-style scripts —
+`process`, `fs`, and `path`. They mirror the corresponding Node.js
+surface for the most common operations:
+
+```js
+// arguments + environment
+print(process.argv)          // [ binary_path, ...user_args ]
+print(process.cwd())
+print(process.env.HOME)
+print(process.platform)      // "linux" | "darwin" | "win32"
+if (process.argv.length < 2) process.exit(1)
+
+// path utilities
+path.join("src", "x", "..", "y.qs")   // "src/x/../y.qs"
+path.basename("/tmp/foo.txt")          // "foo.txt"
+path.basename("/tmp/foo.txt", ".txt")  // "foo"
+path.dirname("/tmp/foo.txt")           // "/tmp"
+path.extname("note.tar.gz")            // ".gz"
+path.isAbsolute("/etc")                // true
+path.sep                                // "/" on POSIX, "\\" on Windows
+
+// file system
+fs.writeFile("out.txt", "hello\n")
+let body = fs.readFile("out.txt")
+fs.exists("out.txt")          // true
+fs.readDir(".")               // [ "src", "README.md", ... ]
+fs.mkdir("build")
+fs.remove("out.txt")          // file or empty directory
+```
+
+`fs.readFile` returns the file body as a string and throws on missing
+files; `fs.writeFile` overwrites. `fs.readDir` lists entries excluding
+`.` / `..`. Error cases (`Error` instances) are thrown with a descriptive
+message — catch them with `try { ... } catch (e) { ... }` if you'd rather
+handle them yourself.
+
 ## Inline C blocks
 
 When a function-by-function FFI binding feels too coarse, you can drop raw C

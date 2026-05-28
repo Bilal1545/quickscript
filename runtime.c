@@ -34,6 +34,9 @@ JsValue* js_Error_global = NULL;
 JsValue* js_TypeError_global = NULL;
 JsValue* js_RangeError_global = NULL;
 JsValue* js_SyntaxError_global = NULL;
+JsValue* js_process = NULL;
+JsValue* js_fs = NULL;
+JsValue* js_path = NULL;
 
 // ==========================================
 // CONSTRUCTORS
@@ -2052,10 +2055,237 @@ JsValue* js_static_dispatch(JsValue* ctor, const char* method, JsValue** args, i
 }
 
 // ==========================================
+// STDLIB: process / fs / path
+// ==========================================
+
+#ifdef _WIN32
+  #include <direct.h>
+  #include <io.h>
+  #define QSC_PATH_SEP "\\"
+  #define QSC_PATH_SEP_CH '\\'
+  #define qsc_mkdir(p)  _mkdir(p)
+#else
+  #include <unistd.h>
+  #include <sys/stat.h>
+  #define QSC_PATH_SEP "/"
+  #define QSC_PATH_SEP_CH '/'
+  #define qsc_mkdir(p)  mkdir((p), 0777)
+#endif
+#include <dirent.h>  /* both POSIX and MinGW provide this */
+
+extern char **environ;
+
+static int qsc_path_is_sep(char c) { return c == '/' || c == '\\'; }
+
+static JsValue* js_process_exit_fn(JsValue** args, int argc) {
+    int code = (argc > 0) ? (int)js_to_number(args[0]) : 0;
+    exit(code);
+    return js_undefined();
+}
+
+static JsValue* js_process_cwd_fn(JsValue** args, int argc) {
+    (void)args; (void)argc;
+    char buf[4096];
+    if (!getcwd(buf, sizeof buf)) return js_string("");
+    return js_string(buf);
+}
+
+static JsValue* js_fs_readFile_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "fs.readFile: path required"));
+    char* path = js_to_string(args[0]);
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        char msg[512]; snprintf(msg, sizeof msg, "fs.readFile: cannot open '%s'", path);
+        free(path);
+        js_throw(js_error_new("Error", msg));
+    }
+    free(path);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); js_throw(js_error_new("Error", "fs.readFile: ftell failed")); }
+    fseek(f, 0, SEEK_SET);
+    char* buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); js_throw(js_error_new("Error", "fs.readFile: out of memory")); }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    buf[got] = '\0';
+    fclose(f);
+    JsValue* v = js_string(buf);
+    free(buf);
+    return v;
+}
+
+static JsValue* js_fs_writeFile_fn(JsValue** args, int argc) {
+    if (argc < 2) js_throw(js_error_new("TypeError", "fs.writeFile: path and data required"));
+    char* path = js_to_string(args[0]);
+    char* data = js_to_string(args[1]);
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        char msg[512]; snprintf(msg, sizeof msg, "fs.writeFile: cannot open '%s'", path);
+        free(path); free(data);
+        js_throw(js_error_new("Error", msg));
+    }
+    size_t n = strlen(data);
+    size_t wrote = fwrite(data, 1, n, f);
+    fclose(f);
+    free(path); free(data);
+    if (wrote != n) js_throw(js_error_new("Error", "fs.writeFile: short write"));
+    return js_undefined();
+}
+
+static JsValue* js_fs_exists_fn(JsValue** args, int argc) {
+    if (argc < 1) return js_bool(0);
+    char* path = js_to_string(args[0]);
+#ifdef _WIN32
+    int ok = (_access(path, 0) == 0);
+#else
+    struct stat st;
+    int ok = (stat(path, &st) == 0);
+#endif
+    free(path);
+    return js_bool(ok);
+}
+
+static JsValue* js_fs_readDir_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "fs.readDir: path required"));
+    char* path = js_to_string(args[0]);
+    JsValue* arr = js_array_new();
+    DIR* d = opendir(path);
+    if (!d) {
+        char msg[512]; snprintf(msg, sizeof msg, "fs.readDir: cannot open '%s'", path);
+        free(path);
+        js_throw(js_error_new("Error", msg));
+    }
+    free(path);
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        js_array_push(arr, js_string(e->d_name));
+    }
+    closedir(d);
+    return arr;
+}
+
+static JsValue* js_fs_remove_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "fs.remove: path required"));
+    char* path = js_to_string(args[0]);
+    int rc = remove(path);  /* removes file or empty dir on most platforms */
+    free(path);
+    return js_bool(rc == 0);
+}
+
+static JsValue* js_fs_mkdir_fn(JsValue** args, int argc) {
+    if (argc < 1) js_throw(js_error_new("TypeError", "fs.mkdir: path required"));
+    char* path = js_to_string(args[0]);
+    int rc = qsc_mkdir(path);
+    free(path);
+    return js_bool(rc == 0);
+}
+
+static JsValue* js_path_join_fn(JsValue** args, int argc) {
+    /* concatenate non-empty args with QSC_PATH_SEP, collapsing duplicate separators */
+    if (argc == 0) return js_string("");
+    size_t cap = 1;
+    char** parts = (char**)calloc((size_t)argc, sizeof(char*));
+    for (int i = 0; i < argc; i++) {
+        parts[i] = js_to_string(args[i]);
+        cap += strlen(parts[i]) + 1;
+    }
+    char* out = (char*)malloc(cap);
+    out[0] = '\0';
+    size_t len = 0;
+    for (int i = 0; i < argc; i++) {
+        const char* p = parts[i];
+        if (!*p) continue;
+        if (len > 0) {
+            /* strip leading sep on p; strip trailing sep on out */
+            while (len > 0 && qsc_path_is_sep(out[len-1])) { out[--len] = '\0'; }
+            while (*p && qsc_path_is_sep(*p)) p++;
+            out[len++] = QSC_PATH_SEP_CH;
+            out[len] = '\0';
+        }
+        size_t pl = strlen(p);
+        memcpy(out + len, p, pl);
+        len += pl;
+        out[len] = '\0';
+    }
+    JsValue* v = js_string(out);
+    free(out);
+    for (int i = 0; i < argc; i++) free(parts[i]);
+    free(parts);
+    return v;
+}
+
+static JsValue* js_path_basename_fn(JsValue** args, int argc) {
+    if (argc < 1) return js_string("");
+    char* p = js_to_string(args[0]);
+    size_t n = strlen(p);
+    /* trim trailing separators */
+    while (n > 0 && qsc_path_is_sep(p[n-1])) n--;
+    size_t s = n;
+    while (s > 0 && !qsc_path_is_sep(p[s-1])) s--;
+    char* slice = (char*)malloc(n - s + 1);
+    memcpy(slice, p + s, n - s);
+    slice[n - s] = '\0';
+    /* optional suffix arg */
+    if (argc > 1) {
+        char* suf = js_to_string(args[1]);
+        size_t sl = strlen(slice), sufl = strlen(suf);
+        if (sufl > 0 && sl >= sufl && strcmp(slice + sl - sufl, suf) == 0) {
+            slice[sl - sufl] = '\0';
+        }
+        free(suf);
+    }
+    JsValue* v = js_string(slice);
+    free(slice); free(p);
+    return v;
+}
+
+static JsValue* js_path_dirname_fn(JsValue** args, int argc) {
+    if (argc < 1) return js_string("");
+    char* p = js_to_string(args[0]);
+    size_t n = strlen(p);
+    while (n > 0 && qsc_path_is_sep(p[n-1])) n--;
+    while (n > 0 && !qsc_path_is_sep(p[n-1])) n--;
+    while (n > 1 && qsc_path_is_sep(p[n-1])) n--;
+    char* slice = (char*)malloc(n + 1);
+    if (n == 0) { slice[0] = '.'; slice[1] = '\0'; }
+    else { memcpy(slice, p, n); slice[n] = '\0'; }
+    JsValue* v = js_string(slice);
+    free(slice); free(p);
+    return v;
+}
+
+static JsValue* js_path_extname_fn(JsValue** args, int argc) {
+    if (argc < 1) return js_string("");
+    char* p = js_to_string(args[0]);
+    size_t n = strlen(p);
+    /* find last '.' after the last separator */
+    size_t base = n;
+    while (base > 0 && !qsc_path_is_sep(p[base-1])) base--;
+    char* dot = NULL;
+    for (size_t i = base; i < n; i++) if (p[i] == '.' && i > base) dot = p + i;
+    JsValue* v = js_string(dot ? dot : "");
+    free(p);
+    return v;
+}
+
+static JsValue* js_path_isAbsolute_fn(JsValue** args, int argc) {
+    if (argc < 1) return js_bool(0);
+    char* p = js_to_string(args[0]);
+    int ok = 0;
+    if (p[0] == '/' || p[0] == '\\') ok = 1;
+#ifdef _WIN32
+    else if (p[0] && p[1] == ':' && (p[2] == '/' || p[2] == '\\')) ok = 1;
+#endif
+    free(p);
+    return js_bool(ok);
+}
+
+// ==========================================
 // RUNTIME INIT
 // ==========================================
 
-void js_runtime_init(void) {
+void js_runtime_init(int argc, char** argv) {
     srand(42);
 
     // console
@@ -2117,6 +2347,60 @@ void js_runtime_init(void) {
     js_TypeError_global    = js_function(js_TypeError_construct);
     js_RangeError_global   = js_function(js_RangeError_construct);
     js_SyntaxError_global  = js_function(js_SyntaxError_construct);
+
+    // process
+    js_process = js_object_new();
+    JsValue* argv_arr = js_array_new();
+    for (int i = 0; i < argc; i++) {
+        js_array_push(argv_arr, js_string(argv[i] ? argv[i] : ""));
+    }
+    js_object_set(js_process, "argv", argv_arr);
+
+    JsValue* env_obj = js_object_new();
+    if (environ) {
+        for (char** e = environ; *e; e++) {
+            const char* eq = strchr(*e, '=');
+            if (!eq) continue;
+            size_t kn = (size_t)(eq - *e);
+            char* k = (char*)malloc(kn + 1);
+            memcpy(k, *e, kn); k[kn] = '\0';
+            js_object_set(env_obj, k, js_string(eq + 1));
+            free(k);
+        }
+    }
+    js_object_set(js_process, "env", env_obj);
+
+    js_object_set(js_process, "exit", js_function(js_process_exit_fn));
+    js_object_set(js_process, "cwd",  js_function(js_process_cwd_fn));
+    js_object_set(js_process, "platform", js_string(
+#if defined(_WIN32)
+        "win32"
+#elif defined(__APPLE__)
+        "darwin"
+#elif defined(__linux__)
+        "linux"
+#else
+        "unknown"
+#endif
+    ));
+
+    // fs
+    js_fs = js_object_new();
+    js_object_set(js_fs, "readFile",  js_function(js_fs_readFile_fn));
+    js_object_set(js_fs, "writeFile", js_function(js_fs_writeFile_fn));
+    js_object_set(js_fs, "exists",    js_function(js_fs_exists_fn));
+    js_object_set(js_fs, "readDir",   js_function(js_fs_readDir_fn));
+    js_object_set(js_fs, "remove",    js_function(js_fs_remove_fn));
+    js_object_set(js_fs, "mkdir",     js_function(js_fs_mkdir_fn));
+
+    // path
+    js_path = js_object_new();
+    js_object_set(js_path, "sep",        js_string(QSC_PATH_SEP));
+    js_object_set(js_path, "join",       js_function(js_path_join_fn));
+    js_object_set(js_path, "basename",   js_function(js_path_basename_fn));
+    js_object_set(js_path, "dirname",    js_function(js_path_dirname_fn));
+    js_object_set(js_path, "extname",    js_function(js_path_extname_fn));
+    js_object_set(js_path, "isAbsolute", js_function(js_path_isAbsolute_fn));
 }
 
 #ifdef _WIN32
