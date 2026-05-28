@@ -33,6 +33,20 @@ iwr -useb https://raw.githubusercontent.com/Bilal1545/quickscript/main/install.p
 
 That's it — run `qsc --help` to get started. Prebuilt binaries for all three platforms are also available on the [Releases page](https://github.com/Bilal1545/quickscript/releases/latest) if you'd rather download by hand.
 
+### Twilight channel (latest CI build)
+
+Want the freshest build straight from `main` without waiting for a release? Set `QSC_VERSION=twilight` and the installer pulls the most recent CI artifact via [nightly.link](https://nightly.link):
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Bilal1545/quickscript/main/install.sh | QSC_VERSION=twilight sh
+```
+
+```powershell
+# Windows (PowerShell)
+$env:QSC_VERSION = "twilight"; iwr -useb https://raw.githubusercontent.com/Bilal1545/quickscript/main/install.ps1 | iex
+```
+
 The Windows installer bundles a portable Tiny C Compiler (TCC), so no separate
 gcc / MSYS2 setup is needed. On Linux and macOS, `gcc` (or any compatible
 `cc`) must already be on your `PATH` — set `QSC_CC` to override the choice
