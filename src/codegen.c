@@ -864,8 +864,11 @@ static void gen_stmt(Codegen *c, AstNode *n, Buffer *out) {
             gen_block(c, n->if_.consequent, out);
             if (n->if_.alternate) {
                 if (n->if_.alternate->kind == AST_IF_STMT) {
-                    buf_append_str(out, "else ");
+                    /* Wrap in braces so the loc-update emitted by gen_stmt
+                     * doesn't detach the inner `if` from this `else`. */
+                    buf_append_str(out, "else {\n");
                     gen_stmt(c, n->if_.alternate, out);
+                    buf_append_str(out, "}\n");
                 } else {
                     buf_append_str(out, "else ");
                     gen_block(c, n->if_.alternate, out);
